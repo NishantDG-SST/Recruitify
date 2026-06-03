@@ -1,14 +1,5 @@
 # Contributing to Recruitify
 
-We love your input! We want to make contributing to this project as easy and transparent as possible, whether it's:
-- Reporting a bug
-- Discussing the current state of the code
-- Submitting a fix
-- Proposing new features
-
-## We Develop with Github
-We use GitHub to host code, to track issues and feature requests, as well as accept pull requests.
-
 ## How to Contribute
 
 ### 1. Fork & Clone
@@ -47,12 +38,5 @@ Go to the original Recruitify repository on GitHub and click "New pull request".
 ## Development Setup
 
 See the [README.md](README.md) for detailed instructions on how to set up the Postgres database, Redpanda, FastAPI backend, and Next.js frontend locally using Docker Compose.
-
-## Code Style
-- **Python (Backend):** Follow PEP 8 guidelines. Type hints are highly encouraged.
-- **TypeScript (Frontend):** Use strong typing, avoid `any`, and follow the existing Prettier/ESLint configuration.
-
-## Report Bugs Using GitHub's Issues
-We use GitHub issues to track public bugs. Report a bug by opening a new issue; it's that easy!
 
 *Thank you for contributing!*
