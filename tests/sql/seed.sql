@@ -1,0 +1,6 @@
+INSERT INTO organizations (id, name) VALUES ('00000000-0000-0000-0000-000000000001', 'Demo Org')
+ON CONFLICT DO NOTHING;
+
+INSERT INTO users (id, org_id, email, full_name, status)
+VALUES ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000001', 'demo@example.com', 'Demo User', 'active')
+ON CONFLICT DO NOTHING;

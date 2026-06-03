@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package events;
+
+message EventMetadata {
+  string event_id = 1;
+  string occurred_at = 2;
+  string org_id = 3;
+  string correlation_id = 4;
+}
+
+message JobCreated {
+  EventMetadata meta = 1;
+  string job_id = 2;
+  string job_version_id = 3;
+  string created_by = 4;
+}
+
+message ResumeUploaded {
+  EventMetadata meta = 1;
+  string candidate_id = 2;
+  string candidate_snapshot_id = 3;
+  string document_id = 4;
+  string job_id = 5;
+  string batch_id = 6;
+}
+
+message ResumeParsed {
+  EventMetadata meta = 1;
+  string candidate_id = 2;
+  string document_id = 3;
+  string job_id = 4;
+  string parse_version = 5;
+}
+
+message CandidateExtracted {
+  EventMetadata meta = 1;
+  string candidate_id = 2;
+  string candidate_snapshot_id = 3;
+  string job_id = 4;
+  string extraction_version = 5;
+}
+
+message EmbeddingGenerated {
+  EventMetadata meta = 1;
+  string candidate_snapshot_id = 2;
+  string embedding_model_id = 3;
+  string embedding_id = 4;
+}
+
+message FeaturesGenerated {
+  EventMetadata meta = 1;
+  string candidate_snapshot_id = 2;
+  string job_version_id = 3;
+  string feature_set_id = 4;
+  string feature_version = 5;
+}
+
+message RankingRequested {
+  EventMetadata meta = 1;
+  string job_version_id = 2;
+  string ranking_run_id = 3;
+  string requested_by = 4;
+}
+
+message RankingCompleted {
+  EventMetadata meta = 1;
+  string ranking_run_id = 2;
+  string job_version_id = 3;
+  string candidate_count = 4;
+}
+
+message InterviewGenerated {
+  EventMetadata meta = 1;
+  string ranking_run_id = 2;
+  string candidate_snapshot_id = 3;
+  string interview_id = 4;
+}
+
+message BiasAnalysisCompleted {
+  EventMetadata meta = 1;
+  string ranking_run_id = 2;
+  string analysis_id = 3;
+}

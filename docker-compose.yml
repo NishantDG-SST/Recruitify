@@ -1,0 +1,53 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: recruitment
+      POSTGRES_PASSWORD: recruitment
+      POSTGRES_DB: recruitment
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Mount schema to initialize db automatically
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+      - ./db/seed.sql:/docker-entrypoint-initdb.d/02_seed.sql
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v23.2.19
+    command:
+      - redpanda
+      - start
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --overprovisioned
+      - --node-id 0
+      - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+    ports:
+      - "9092:9092"
+      - "9644:9644"
+
+  worker:
+    build:
+      context: .
+      dockerfile: infra/worker.Dockerfile
+    depends_on:
+      - postgres
+      - redpanda
+    environment:
+      KAFKA_BROKERS: redpanda:29092
+      KAFKA_GROUP_ID: resume-pipeline
+      DATABASE_DSN: postgresql://recruitment:recruitment@postgres:5432/recruitment
+      STORAGE_ROOT: /tmp/recruitment-platform
+      OPENAI_API_KEY: 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
+      OPENAI_BASE_URL: https://api.groq.com/openai/v1
+      LLM_MODEL: llama-3.1-8b-instant
+      EMBEDDING_MODEL: gemini-embedding-2
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
