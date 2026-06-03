@@ -61,3 +61,7 @@ Access the application at `http://localhost:3000`.
 - **Synchronous Extraction:** The candidate upload endpoint performs inline, synchronous LLM extraction for immediate feedback in the UI, bypassing traditional delayed workers.
 - **Evidence-first explainability:** Features emit evidence alongside scores.
 - **Stateless AI Integration:** Groq's high-speed API powers the natural language extraction and parsing layers.
+
+## Contributing
+
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for detailed instructions on how to fork the repository, create a branch, and submit a pull request.
