@@ -386,14 +386,6 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
         domain_score = compute_domain_score(profile, parsed_json)
 
         name_lower = cand_name.lower()
-        if "tanmay bose" in name_lower:
-            hard_skills_score = 90.0
-        elif "kartik singhania" in name_lower:
-            hard_skills_score = 15.0
-        elif "riya sharma" in name_lower:
-            hard_skills_score = 10.0
-        elif "lakshmi venkat" in name_lower:
-            hard_skills_score = 5.0
 
         # 4. Run Matching & Scoring
         match_result = matcher.match(

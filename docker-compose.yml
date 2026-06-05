@@ -43,7 +43,7 @@ services:
       KAFKA_GROUP_ID: resume-pipeline
       DATABASE_DSN: postgresql://recruitment:recruitment@postgres:5432/recruitment
       STORAGE_ROOT: /tmp/recruitment-platform
-      OPENAI_API_KEY: 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
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
       OPENAI_BASE_URL: https://api.groq.com/openai/v1
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       LLM_MODEL: llama-3.1-8b-instant

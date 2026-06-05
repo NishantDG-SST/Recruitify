@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from apps.api.src.core.database import get_database
+from core.database import get_database
 from services.candidates.repository import CandidateRepository
 from services.events.repository import EventRepository
 from services.jobs.repository import JobRepository
