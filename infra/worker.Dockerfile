@@ -18,4 +18,4 @@ ENV PYTHONPATH=/app/apps/api/src:/app
 ENV APP_ENV=production
 
 # Run the Kafka consumer script
-CMD ["python", "services/workers/runner.py"]
+CMD ["python", "services/workers/bootstrap.py"]

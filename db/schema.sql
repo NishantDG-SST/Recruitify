@@ -317,3 +317,16 @@ CREATE TABLE audit_logs (
     metadata_json JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE interview_rounds (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id UUID NOT NULL REFERENCES organizations(id),
+    candidate_id UUID NOT NULL REFERENCES candidates(id),
+    round_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'scheduled',
+    feedback TEXT,
+    interviewer_name TEXT,
+    scheduled_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+

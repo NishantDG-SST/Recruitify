@@ -45,6 +45,7 @@ services:
       STORAGE_ROOT: /tmp/recruitment-platform
       OPENAI_API_KEY: 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
       OPENAI_BASE_URL: https://api.groq.com/openai/v1
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
       LLM_MODEL: llama-3.1-8b-instant
       EMBEDDING_MODEL: gemini-embedding-2
     restart: unless-stopped

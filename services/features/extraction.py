@@ -179,7 +179,31 @@ class ExtractionService:
         tokens = set(re.findall(r"[\w.+#/-]+", lower))
 
         tech = sorted({t for t in tokens if t in _TECH_KEYWORDS})
-        soft = sorted({s for s in _SOFT_KEYWORDS if s in lower})
+        soft_set = {s for s in _SOFT_KEYWORDS if s in lower}
+        
+        # Soft skill inference patterns (Issue 4)
+        soft_inference_mappings = {
+            "leadership": ["led team", "managed team", "team lead", "head of", "director of", "vp of", "chief", "founded", "built team"],
+            "communication": ["presented", "communicated", "stakeholder", "client-facing", "cross-functional", "wrote documentation"],
+            "mentoring": ["mentored", "coached", "trained", "onboarded", "junior developers", "interns"],
+            "collaboration": ["collaborated", "worked closely", "partnered with", "cross-team", "cross-functional"],
+            "teamwork": ["team of", "collaborated", "worked with", "alongside", "cross-functional"],
+            "problem-solving": ["solved", "debugged", "troubleshoot", "root cause", "resolved", "optimized"],
+            "project management": ["managed project", "delivered project", "project plan", "roadmap", "milestone", "sprint"],
+            "stakeholder management": ["strong communication", "stakeholder", "executive", "c-suite", "board", "client relationship"],
+            "analytical": ["analyzed", "data-driven", "metrics", "analytics", "insights"],
+            "critical thinking": ["evaluated", "assessed", "strategic", "analysis"],
+            "agile": ["agile", "scrum", "kanban", "sprint", "standup"],
+            "presentation": ["presented", "presentation", "demo", "conference", "spoke at"],
+        }
+        
+        for skill, patterns in soft_inference_mappings.items():
+            for pattern in patterns:
+                if pattern in lower:
+                    soft_set.add(skill)
+                    break
+                    
+        soft = sorted(list(soft_set))
         domains = sorted({d for d in _DOMAIN_KEYWORDS if d in lower})
 
         normalized = self._normalizer.normalize_skills(tech)

@@ -5,6 +5,7 @@ domain knowledge, must-have vs nice-to-have) from raw job description text.
 """
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -107,11 +108,52 @@ class JobDescriptionParser:
     def _empty_fallback(self, text: str) -> ParsedJobDescription:
         """Return a basic fallback when LLM is unavailable."""
         title = text.split("\n")[0][:100].strip() if text else "Unknown Role"
+        
+        lower = text.lower() if text else ""
+        keywords = {
+            "python", "java", "javascript", "typescript", "go", "rust", "c++", "c#",
+            "ruby", "php", "scala", "kotlin", "swift", "sql", "nosql",
+            "react", "angular", "vue", "node", "django", "flask", "fastapi",
+            "spring", "spring boot", "rails", "nextjs", "next.js", "tailwind",
+            "aws", "gcp", "azure", "docker", "kubernetes", "terraform", "ansible",
+            "postgres", "postgresql", "mysql", "mongodb", "redis", "elasticsearch",
+            "kafka", "rabbitmq", "graphql", "rest", "grpc", "git", "ci/cd"
+        }
+        
+        sentences = re.split(r'[.!?\n]', lower)
+        must_have = []
+        nice_to_have = []
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            tokens = set(re.findall(r"[\w.+#/-]+", sentence))
+            sentence_skills = [k for k in keywords if k in tokens or (k in sentence and " " in k)]
+            
+            if any(p in sentence for p in ["plus", "nice to have", "preferred", "bonus", "desired", "advantage"]):
+                nice_to_have.extend(sentence_skills)
+            else:
+                must_have.extend(sentence_skills)
+                
+        normalized_must = self._normalizer.normalize_skills(must_have).skills
+        normalized_nice = self._normalizer.normalize_skills(nice_to_have).skills
+        
+        normalized_must = sorted(list(set(normalized_must)))
+        normalized_nice = sorted(list(set(normalized_nice)))
+        normalized_nice = [s for s in normalized_nice if s not in normalized_must]
+        
+        years_min = 0
+        years_match = re.search(r"(\d{1,2})\+?\s*(?:years?|yrs?)\s*(?:of\s+)?(?:experience)?", lower)
+        if years_match:
+            years_min = int(years_match.group(1))
+            
         return ParsedJobDescription(
             title=title,
-            must_have_skills=[],
-            nice_to_have_skills=[],
+            must_have_skills=normalized_must,
+            nice_to_have_skills=normalized_nice,
             soft_skills=[],
             domains=[],
-            raw_extraction={},
+            years_experience_min=years_min,
+            raw_extraction={}
         )

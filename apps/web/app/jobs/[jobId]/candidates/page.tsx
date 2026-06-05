@@ -1,26 +1,58 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 
-import { uploadCandidates } from "../../../lib/api";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "/api";
+
+async function uploadSingleCandidate(jobId: string, file: File) {
+  const form = new FormData();
+  form.append("files", file);
+  const response = await fetch(`${API_BASE}/jobs/${jobId}/candidates`, {
+    method: "POST",
+    body: form,
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `HTTP ${response.status}`);
+  }
+  return response.json();
+}
 
 export default function CandidateUploadPage({ params }: { params: { jobId: string } }) {
   const [files, setFiles] = useState<File[]>([]);
   const [status, setStatus] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadResults, setUploadResults] = useState<{ success: number; failed: string[] } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const submitFiles = async () => {
-    try {
-      if (!files.length) {
-        setStatus("Select one or more resumes first");
-        return;
-      }
-      setStatus("Uploading...");
-      const response = await uploadCandidates(params.jobId, files);
-      setStatus(`Batch ${response.batch_id} submitted`);
-      setFiles([]);
-    } catch (error) {
-      setStatus("Failed to upload candidates");
+    if (!files.length) {
+      setStatus("Select one or more resumes first");
+      return;
     }
+    setIsUploading(true);
+    setUploadResults(null);
+    const total = files.length;
+    let successCount = 0;
+    const failedFiles: string[] = [];
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      setStatus(`Processing ${i + 1} of ${total}: ${file.name}`);
+      try {
+        await uploadSingleCandidate(params.jobId, file);
+        successCount++;
+      } catch (err: any) {
+        console.error(`Upload failed for ${file.name}:`, err);
+        failedFiles.push(file.name);
+      }
+    }
+
+    setStatus(null);
+    setUploadResults({ success: successCount, failed: failedFiles });
+    setIsUploading(false);
+    setFiles([]);
+    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   return (
@@ -32,25 +64,51 @@ export default function CandidateUploadPage({ params }: { params: { jobId: strin
             className="input"
             type="file"
             multiple
+            ref={fileInputRef}
             onChange={(event) => setFiles(Array.from(event.target.files || []))}
           />
-          <button className="button" onClick={submitFiles}>
-            Upload resumes
+          <button className="button" onClick={submitFiles} disabled={isUploading}>
+            {isUploading ? "Uploading..." : "Upload resumes"}
           </button>
           <button className="button secondary">Link external source</button>
-          {status ? <span>{status}</span> : null}
+          
+          {/* Progress indicator */}
+          {status && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '8px' }}>
+              <div style={{ width: '16px', height: '16px', border: '2px solid #b4462f', borderTop: '2px solid transparent', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+              <span style={{ fontWeight: 700, color: '#b4462f' }}>{status}</span>
+              <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+            </div>
+          )}
+
+          {/* Results banner */}
+          {uploadResults && (
+            <div style={{ 
+              marginTop: '12px',
+              background: uploadResults.failed.length === 0 ? '#d4edda' : '#fff3cd', 
+              border: `1px solid ${uploadResults.failed.length === 0 ? '#28a745' : '#ffc107'}`, 
+              borderRadius: '8px', 
+              padding: '12px' 
+            }}>
+              <div style={{ fontWeight: 700, color: uploadResults.failed.length === 0 ? '#155724' : '#856404' }}>
+                ✅ {uploadResults.success} candidate{uploadResults.success !== 1 ? 's' : ''} uploaded successfully
+                {uploadResults.failed.length > 0 && ` | ❌ ${uploadResults.failed.length} failed`}
+              </div>
+              {uploadResults.failed.length > 0 && (
+                <div style={{ fontSize: '12px', color: '#856404', marginTop: '4px' }}>
+                  Failed files: {uploadResults.failed.join(', ')}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
       <div className="panel">
         <h2>Batch status</h2>
         <div className="list">
           <div className="row">
-            <strong>Batch 2024-06-03</strong>
-            <span>Parsing 14 of 20</span>
-          </div>
-          <div className="row">
-            <strong>Batch 2024-06-02</strong>
-            <span>Ranking ready</span>
+            <strong>Upload Progress</strong>
+            <span>{isUploading ? status : (uploadResults ? `${uploadResults.success} processed` : "Ready")}</span>
           </div>
         </div>
       </div>

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { createJob, fetchJobs } from "../lib/api";
+import { createJob, fetchJobs, deleteJob } from "../lib/api";
 import Link from "next/link";
 
 export default function JobsPage() {
@@ -33,6 +33,18 @@ export default function JobsPage() {
       loadJobs();
     } catch (error) {
       setStatus("Failed to create job");
+    }
+  };
+
+  const handleDeleteJob = async (jobId: string, jobTitle: string) => {
+    if (!confirm(`⚠️ Delete "${jobTitle}"? This will permanently remove all candidates, rankings, and interviews for this job. This cannot be undone.`)) return;
+    try {
+      setStatus("Deleting job...");
+      await deleteJob(jobId);
+      setStatus(`✅ Job deleted successfully.`);
+      loadJobs();
+    } catch (e) {
+      setStatus("❌ Failed to delete job.");
     }
   };
 
@@ -79,10 +91,17 @@ export default function JobsPage() {
                 {job.status === "processing" ? (
                   <div className="tag">Processing JD</div>
                 ) : (
-                  <div style={{ display: 'flex', gap: '8px' }}>
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                     <Link href={`/jobs/${job.id}/rankings`}>
                       <button className="pill-button">View Rankings</button>
                     </Link>
+                    <button
+                      className="pill-button"
+                      onClick={() => handleDeleteJob(job.id, job.title)}
+                      style={{ background: '#d90429', color: '#fff', fontSize: '12px' }}
+                    >
+                      Delete
+                    </button>
                   </div>
                 )}
               </div>

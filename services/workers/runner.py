@@ -48,6 +48,7 @@ def run_worker(
     # Build the LLM client from environment
     llm_config = LLMConfig(
         api_key=os.getenv("OPENAI_API_KEY", ""),
+        gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
         base_url=os.getenv("OPENAI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/"),
         model=os.getenv("LLM_MODEL", "gemini-flash-latest"),
         embedding_model=os.getenv("EMBEDDING_MODEL", "gemini-embedding-2"),

@@ -20,3 +20,7 @@ class DocumentParser:
     def parse_docx(self, content: bytes) -> ParsedDocument:
         parsed = parse_docx(content)
         return ParsedDocument(text=parsed.text, metadata={}, warnings=parsed.warnings)
+
+    def parse_text(self, content: bytes) -> ParsedDocument:
+        text = content.decode("utf-8", errors="replace")
+        return ParsedDocument(text=text, metadata={}, warnings=[])
