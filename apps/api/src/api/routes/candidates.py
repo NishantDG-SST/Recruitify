@@ -193,14 +193,6 @@ def get_candidate_detail(
     domain_score = compute_domain_score(profile, job_requirements)
 
     name_lower = (profile.get("name") or "").lower()
-    if "tanmay bose" in name_lower:
-        hard_skills_score = 90.0
-    elif "kartik singhania" in name_lower:
-        hard_skills_score = 15.0
-    elif "riya sharma" in name_lower:
-        hard_skills_score = 10.0
-    elif "lakshmi venkat" in name_lower:
-        hard_skills_score = 5.0
 
     scores = {
         "hard_skills": hard_skills_score,
