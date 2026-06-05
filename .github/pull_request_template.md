@@ -2,6 +2,8 @@
 <!-- Provide a brief summary of the changes introduced by this PR -->
 
 ## TODO Fixes
+<!-- Mark a task as done by placing an 'x' inside the brackets: [x] -->
+<!-- Tasks that are not done should remain empty: [ ] -->
 - [ ] TODO
   - [ ] Syncing user profile to database (currently everything goes to global)
   - [ ] Ranking/ Scoring mechanism
