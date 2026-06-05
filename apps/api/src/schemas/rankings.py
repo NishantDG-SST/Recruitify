@@ -29,6 +29,7 @@ class RankingCandidate(BaseModel):
     score: float
     rank: int
     explanation_text: str | None = None
+    category_scores: dict | None = None
 
 
 class RankingResponse(BaseModel):
@@ -37,10 +38,10 @@ class RankingResponse(BaseModel):
 
 
 class SimulateRankingRequest(BaseModel):
-    candidates: list[MatchInput]
+    candidates: list[MatchInput] | None = None
     weights: dict
-    must_have: list[str]
-    threshold: float
+    must_have: list[str] | None = None
+    threshold: float | None = 40.0
 
 
 class OverrideRequest(BaseModel):

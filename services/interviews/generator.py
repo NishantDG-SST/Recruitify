@@ -114,12 +114,15 @@ class InterviewGenerator:
                 candidate_snapshot_id=candidate_snapshot_id,
                 profile=profile,
                 job_requirements=job_requirements,
+                gaps=gaps or [],
             )
         return self._generate_templates(
             candidate_snapshot_id=candidate_snapshot_id,
             skills=skills,
             gaps=gaps or [],
             roles=roles or [],
+            profile=profile,
+            job_requirements=job_requirements,
         )
 
     # ------------------------------------------------------------------
@@ -131,6 +134,7 @@ class InterviewGenerator:
         candidate_snapshot_id: str,
         profile: Dict[str, Any],
         job_requirements: Optional[Dict[str, Any]],
+        gaps: List[str],
     ) -> InterviewQuestionSet:
         user_prompt_parts = [f"## Candidate Profile\n{_format_profile(profile)}"]
         if job_requirements:
@@ -143,8 +147,10 @@ class InterviewGenerator:
             return self._generate_templates(
                 candidate_snapshot_id=candidate_snapshot_id,
                 skills=profile.get("skills", []),
-                gaps=profile.get("gaps", []),
+                gaps=gaps,
                 roles=profile.get("roles", []),
+                profile=profile,
+                job_requirements=job_requirements,
             )
 
         questions = []
@@ -172,41 +178,75 @@ class InterviewGenerator:
         skills: List[str],
         gaps: List[str],
         roles: List[str],
+        profile: Optional[Dict[str, Any]] = None,
+        job_requirements: Optional[Dict[str, Any]] = None,
     ) -> InterviewQuestionSet:
         questions: List[InterviewQuestion] = []
+        name = "the candidate"
+        current_role = "Software Engineer"
+        experience_text = ""
+        
+        if profile:
+            name = profile.get("name") or name
+            current_role = profile.get("current_role") or current_role
+            raw_text = profile.get("raw_text", "")
+            
+            import re
+            sentences = re.split(r'[.!?\n]', raw_text)
+            experience_sentences = [s.strip() for s in sentences if any(x in s.lower() for x in ["built", "developed", "managed", "implemented", "designed", "experience", "worked"])]
+            if experience_sentences:
+                experience_text = experience_sentences[0]
 
         # Skill verification questions
-        for skill in skills[:3]:
-            for template in _SKILL_TEMPLATES[:1]:
-                questions.append(InterviewQuestion(
-                    prompt=template.format(skill=skill),
-                    category="skill_verification",
-                    target_skill=skill,
-                ))
+        for skill in skills[:2]:
+            if experience_text and skill.lower() in experience_text.lower():
+                prompt = f"In your resume, you mentioned: '{experience_text}'. Can you walk me through the technical details of how you used {skill} in that context?"
+                rationale = f"Verifying candidate's claims regarding {skill} based on their highlighted experience."
+            else:
+                prompt = f"Describe a challenging technical project where you applied your expertise in {skill}. What was your specific contribution?"
+                rationale = f"Evaluating depth of knowledge in {skill}."
+                
+            questions.append(InterviewQuestion(
+                prompt=prompt,
+                category="skill_verification",
+                rationale=rationale,
+                target_skill=skill,
+            ))
 
         # Gap probing questions
+        job_title = "Software Engineer"
+        if job_requirements:
+            job_title = job_requirements.get("title") or job_title
+            
         for gap in gaps[:2]:
+            prompt = f"The {job_title} role requires proficiency in {gap}, which is not prominent in your background. How do you plan to leverage your experience in {skills[0] if skills else 'similar technologies'} to ramp up on {gap}?"
             questions.append(InterviewQuestion(
-                prompt=_GAP_TEMPLATES[0].format(skill=gap),
+                prompt=prompt,
                 category="gap_probing",
+                rationale=f"Assessing ability to bridge key technical gap in {gap}.",
                 target_skill=gap,
             ))
 
         # Career trajectory
         if len(roles) >= 2:
-            questions.append(InterviewQuestion(
-                prompt=_TRAJECTORY_TEMPLATES[0].format(
-                    prev_role=roles[-2] if len(roles) >= 2 else "your previous role",
-                    current_role=roles[-1] if roles else "your current role",
-                ),
-                category="career_narrative",
-            ))
+            prompt = f"Walk me through your decision to move from {roles[-2]} to your current role as {roles[-1]}."
+        elif current_role and current_role != "Unknown Role":
+            prompt = f"What motivated you to apply for this {job_title} position, and how does it fit into your career trajectory as a {current_role}?"
+        else:
+            prompt = f"What motivated you to apply for this {job_title} position, and what are your long-term career goals?"
+            
+        questions.append(InterviewQuestion(
+            prompt=prompt,
+            category="career_narrative",
+            rationale="Evaluating career alignment and motivation.",
+        ))
 
         # General questions to fill up to 5 minimum
-        for template in _GENERAL_TEMPLATES:
-            if len(questions) >= 6:
-                break
-            questions.append(InterviewQuestion(prompt=template, category="culture_fit"))
+        questions.append(InterviewQuestion(
+            prompt="Describe a situation where you had to learn a new technology under a tight deadline to deliver a project. How did you manage it?",
+            category="technical_depth",
+            rationale="Probing technical learning agility.",
+        ))
 
         return InterviewQuestionSet(
             candidate_snapshot_id=candidate_snapshot_id,

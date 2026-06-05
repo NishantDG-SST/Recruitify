@@ -23,12 +23,13 @@ class RankingRepository:
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    def create_run(self, org_id: str, job_version_id: str, scoring_version: str) -> RankingRunRecord:
-        run_id = job_version_id
+    def create_run(self, org_id: str, job_version_id: str, scoring_version: str, created_by: str) -> RankingRunRecord:
+        import uuid
+        run_id = str(uuid.uuid4())
         if self._db.is_configured:
             self._db.execute(
-                "INSERT INTO ranking_runs (id, org_id, job_version_id, status, scoring_version) VALUES (%s, %s, %s, %s, %s)",
-                [run_id, org_id, job_version_id, "completed", scoring_version],
+                "INSERT INTO ranking_runs (id, org_id, job_version_id, status, scoring_version, created_by) VALUES (%s, %s, %s, %s, %s, %s)",
+                [run_id, org_id, job_version_id, "completed", scoring_version, created_by],
             )
         return RankingRunRecord(run_id=run_id)
 
