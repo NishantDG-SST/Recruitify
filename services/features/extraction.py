@@ -25,7 +25,9 @@ from the resume text provided.  Return a JSON object with exactly these keys:
 
 {
   "name": "<candidate full name>",
-  "current_role": "<candidate's most recent or current role>",
+  "email": "<candidate email address>",
+  "phone": "<candidate phone number>",
+  "current_role": "<candidate's most recent job title extracted from their most recent EXPERIENCE entry (e.g. 'Software Developer'). Look in the EXPERIENCE section if not stated at the top.>",
   "technical_skills": ["list of technical skills, tools, languages, frameworks"],
   "soft_skills": ["list of soft skills like leadership, communication"],
   "roles": ["list of job titles the candidate has held"],
@@ -98,6 +100,8 @@ class ExtractionResult:
     """Structured candidate profile extracted from resume text."""
 
     name: str = ""
+    email: str = ""
+    phone: str = ""
     current_role: str = ""
     skills: List[str] = field(default_factory=list)
     roles: List[str] = field(default_factory=list)
@@ -145,11 +149,11 @@ class ExtractionService:
     # ------------------------------------------------------------------
 
     def _extract_llm(self, text: str) -> ExtractionResult:
-        try:
-            raw = self._llm.complete_json(EXTRACTION_SYSTEM_PROMPT, text[:12_000])
-        except Exception:
-            logger.exception("LLM extraction failed – falling back to keywords")
-            return self._extract_keywords(text)
+        # NOTE: intentionally NOT catching exceptions here.
+        # Callers (e.g. candidates.py retry loop) are responsible for
+        # detecting failures (rate limits, network errors) and retrying
+        # with appropriate back-off.
+        raw = self._llm.complete_json(EXTRACTION_SYSTEM_PROMPT, text[:12_000])
 
         tech = [s.strip().lower() for s in raw.get("technical_skills", [])]
         soft = [s.strip().lower() for s in raw.get("soft_skills", [])]
@@ -157,7 +161,9 @@ class ExtractionService:
 
         return ExtractionResult(
             name=raw.get("name", "Unknown Candidate"),
-            current_role=raw.get("current_role", "Unknown Role"),
+            email=raw.get("email", ""),
+            phone=raw.get("phone", ""),
+            current_role=raw.get("current_role", ""),
             skills=normalized.skills,
             soft_skills=soft,
             roles=[r.strip() for r in raw.get("roles", [])],
@@ -224,17 +230,22 @@ class ExtractionService:
         name = "Unknown Candidate"
         current_role = "Unknown Role"
         
+        email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", text)
+        phone_match = re.search(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", text)
+        email = email_match.group(0) if email_match else ""
+        phone = phone_match.group(0) if phone_match else ""
+
         if lines:
             name = lines[0]
             if len(name) > 60:
                 name = name[:60]
-        if len(lines) > 1:
-            current_role = lines[1]
-            if len(current_role) > 60:
-                current_role = current_role[:60]
+                
+        current_role = ""
 
         return ExtractionResult(
             name=name,
+            email=email,
+            phone=phone,
             current_role=current_role,
             skills=normalized.skills,
             soft_skills=soft,

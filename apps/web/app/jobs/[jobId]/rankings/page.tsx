@@ -3,11 +3,25 @@
 import { useEffect, useState } from "react";
 import { fetchRankings, createOverride, generateInterview, fetchBiasAnalysis, simulateRankings, updateCandidateStatus, scheduleInterviewRound } from "../../../lib/api";
 
+/** Strip common markdown syntax for plain-text display */
+function stripMarkdown(text: string): string {
+  if (!text) return "";
+  return text
+    .replace(/\*\*/g, "")     // Strip bold asterisks
+    .replace(/\*/g, "")       // Strip italic asterisks
+    .replace(/#{1,6}\s?/g, "") // Strip headers
+    .replace(/`/g, "")        // Strip backticks
+    .replace(/\n+/g, " ")     // Replace newlines with spaces
+    .replace(/\s+/g, " ")     // Normalize spaces
+    .trim();
+}
+
 type Candidate = { 
   candidate_id: string; 
   candidate_name?: string; 
   score: number; 
   rank: number; 
+  status?: string;
   explanation_text?: string;
   category_scores?: {
     hard_skills?: number;
@@ -141,34 +155,70 @@ export default function RankingsPage({ params }: { params: { jobId: string } }) 
         reason
       });
       alert("Override saved successfully!");
+      setStatus("Refreshing rankings...");
+      const response = await fetchRankings(params.jobId);
+      setCandidates(response.candidates || []);
+      setRunId(response.run_id);
+      setStatus(null);
     } catch (e) {
+      console.error(e);
       alert("Error saving override");
+      setStatus(null);
     }
   };
 
-  const [movedCandidates, setMovedCandidates] = useState<Record<string, boolean>>({});
+  const updateCandidateLocalStatus = (candidate_id: string, newStatus: string) => {
+    setCandidates(prev =>
+      prev.map(c => c.candidate_id === candidate_id ? { ...c, status: newStatus } : c)
+    );
+  };
 
   const handleMoveToInterview = async (candidate_id: string) => {
     try {
       setStatus(`Moving candidate to interview stage...`);
       await updateCandidateStatus(params.jobId, candidate_id, "interviewing");
-      
+
       setStatus(`Scheduling screening round...`);
       await scheduleInterviewRound(params.jobId, candidate_id, {
         round_name: "Screening",
         interviewer_name: "TBD",
         scheduled_at: new Date().toISOString()
       });
-      
+
       setStatus(`Generating tailored questions...`);
       await generateInterview(params.jobId, candidate_id);
-      
-      setMovedCandidates(prev => ({ ...prev, [candidate_id]: true }));
-      alert("Candidate moved to interview stage");
+
+      updateCandidateLocalStatus(candidate_id, "interview");
       setStatus(null);
     } catch (e) {
       console.error(e);
       alert("Error moving candidate to interview");
+      setStatus(null);
+    }
+  };
+
+  const handleSelectOffer = async (candidate_id: string) => {
+    try {
+      setStatus("Updating status to Offered...");
+      await updateCandidateStatus(params.jobId, candidate_id, "offered");
+      updateCandidateLocalStatus(candidate_id, "offered");
+      setStatus(null);
+    } catch (e) {
+      console.error(e);
+      alert("Error updating candidate status");
+      setStatus(null);
+    }
+  };
+
+  const handleReject = async (candidate_id: string) => {
+    try {
+      setStatus("Updating status to Rejected...");
+      await updateCandidateStatus(params.jobId, candidate_id, "rejected");
+      updateCandidateLocalStatus(candidate_id, "rejected");
+      setStatus(null);
+    } catch (e) {
+      console.error(e);
+      alert("Error updating candidate status");
       setStatus(null);
     }
   };
@@ -249,70 +299,124 @@ export default function RankingsPage({ params }: { params: { jobId: string } }) 
             <h2>Ranking Pipeline Results</h2>
             {status ? <div style={{ marginBottom: 12, fontWeight: 700, color: '#b4462f' }}>{status}</div> : null}
             <div className="ranking-list">
-              {candidates.map((candidate) => (
-                <div className="ranking-item" key={candidate.candidate_id}>
-                  <div className="ranking-avatar"></div>
-                  <div className="ranking-info">
-                    <div className="ranking-name">{candidate.candidate_name || candidate.candidate_id} <span className="tag" style={{ marginLeft: 8 }}>Rank #{candidate.rank}</span></div>
-                    <div style={{ fontSize: '13px', fontWeight: 700, marginBottom: 4, color: '#b4462f' }}>
-                      Score: {candidate.score.toFixed(1)}
-                    </div>
-                    {candidate.explanation_text && (
-                      <div className="ranking-desc" style={{ marginBottom: 12 }}>
-                        {candidate.explanation_text}
+              {candidates.map((candidate) => {
+                const cStatus = (candidate.status && typeof candidate.status === "string") ? candidate.status.trim().toLowerCase() : "extracted";
+                const isInterview = cStatus === "interview" || cStatus === "interviewing";
+                const isOffered = cStatus === "offered";
+                const isRejected = cStatus === "rejected";
+                const isDefaultOrActive = cStatus === "extracted" || cStatus === "active" || cStatus === "processing" || (!isInterview && !isOffered && !isRejected);
+                const isDone = isOffered || isRejected;
+                return (
+                  <div
+                    className="ranking-item"
+                    key={candidate.candidate_id}
+                    style={
+                      isDone ? { opacity: 0.65, border: `2px solid ${isOffered ? '#2d6a4f' : '#d90429'}`, borderRadius: 8 } :
+                      isInterview ? { border: '2px solid #1d4ed8', borderRadius: 8 } : {}
+                    }
+                  >
+                    <div className="ranking-avatar"></div>
+                    <div className="ranking-info">
+                      <div className="ranking-name">
+                        {candidate.candidate_name || candidate.candidate_id}
+                        <span className="tag" style={{ marginLeft: 8 }}>Rank #{candidate.rank}</span>
+                        {isInterview && (
+                          <span style={{ marginLeft: 8, background: '#dbeafe', color: '#1d4ed8', borderRadius: 4, padding: '2px 8px', fontSize: 11, fontWeight: 700 }}>🎤 In Interview</span>
+                        )}
+                        {isOffered && (
+                          <span style={{ marginLeft: 8, background: '#d1fae5', color: '#065f46', borderRadius: 4, padding: '2px 8px', fontSize: 11, fontWeight: 700 }}>✅ Offered</span>
+                        )}
+                        {isRejected && (
+                          <span style={{ marginLeft: 8, background: '#fee2e2', color: '#991b1b', borderRadius: 4, padding: '2px 8px', fontSize: 11, fontWeight: 700 }}>❌ Rejected</span>
+                        )}
+                        {cStatus === "failed" && (
+                          <span style={{ marginLeft: 8, background: '#fee2e2', color: '#b91c1c', borderRadius: 4, padding: '2px 8px', fontSize: 11, fontWeight: 700 }}>⚠️ Failed Extraction</span>
+                        )}
                       </div>
-                    )}
-                    
-                    {/* Score Breakdown Progress Bars */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', maxWidth: '450px', marginTop: '12px', background: 'rgba(255,255,255,0.4)', padding: '10px', borderRadius: '6px', border: '1px solid rgba(0,0,0,0.03)' }}>
-                      {[
-                        { label: "Hard Skills", value: candidate.category_scores?.hard_skills },
-                        { label: "Soft Skills", value: candidate.category_scores?.soft_skills },
-                        { label: "Experience", value: candidate.category_scores?.experience },
-                        { label: "Domain Knowledge", value: candidate.category_scores?.domain_knowledge },
-                      ].map((bar, idx) => (
-                        <div key={idx} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)' }}>
-                            <span>{bar.label}</span>
-                            <span>{typeof bar.value === 'number' ? `${bar.value.toFixed(0)}%` : '0%'}</span>
-                          </div>
-                          <div style={{ width: '100%', height: '6px', background: 'rgba(0,0,0,0.06)', borderRadius: '3px', overflow: 'hidden' }}>
-                            <div style={{ 
-                              width: `${bar.value || 0}%`, 
-                              height: '100%', 
-                              background: bar.label === 'Hard Skills' ? '#4361ee' : 
-                                          bar.label === 'Soft Skills' ? '#4cc9f0' : 
-                                          bar.label === 'Experience' ? '#f72585' : '#7209b7',
-                              borderRadius: '3px',
-                              transition: 'width 0.3s ease'
-                            }} />
-                          </div>
+                      <div style={{ fontSize: '13px', fontWeight: 700, marginBottom: 4, color: '#b4462f' }}>
+                        Score: {candidate.score.toFixed(1)}
+                      </div>
+                      {candidate.explanation_text && (
+                        <div className="ranking-desc" style={{ marginBottom: 12 }}>
+                          {stripMarkdown(candidate.explanation_text)}
                         </div>
-                      ))}
+                      )}
+                      
+                      {/* Score Breakdown Progress Bars */}
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', maxWidth: '450px', marginTop: '12px', background: 'rgba(255,255,255,0.4)', padding: '10px', borderRadius: '6px', border: '1px solid rgba(0,0,0,0.03)' }}>
+                        {[
+                          { label: "Hard Skills", value: candidate.category_scores?.hard_skills },
+                          { label: "Soft Skills", value: candidate.category_scores?.soft_skills },
+                          { label: "Experience", value: candidate.category_scores?.experience },
+                          { label: "Domain Knowledge", value: candidate.category_scores?.domain_knowledge },
+                        ].map((bar, idx) => (
+                          <div key={idx} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)' }}>
+                               <span>{bar.label}</span>
+                               <span>{typeof bar.value === 'number' ? `${bar.value.toFixed(0)}%` : '0%'}</span>
+                            </div>
+                            <div style={{ width: '100%', height: '6px', background: 'rgba(0,0,0,0.06)', borderRadius: '3px', overflow: 'hidden' }}>
+                              <div style={{ 
+                                width: `${bar.value || 0}%`, 
+                                height: '100%', 
+                                background: bar.label === 'Hard Skills' ? '#4361ee' : 
+                                            bar.label === 'Soft Skills' ? '#4cc9f0' : 
+                                            bar.label === 'Experience' ? '#f72585' : '#7209b7',
+                                borderRadius: '3px',
+                                transition: 'width 0.3s ease'
+                              }} />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', minWidth: '180px' }}>
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        <button
+                          className="pill-button"
+                          onClick={() => !isInterview && !isDone && handleMoveToInterview(candidate.candidate_id)}
+                          disabled={isInterview || isDone}
+                          style={{
+                            flex: 1,
+                            background: isInterview ? '#dbeafe' : (isDone ? '#f3f4f6' : '#1e293b'),
+                            color: isInterview ? '#1d4ed8' : (isDone ? '#9ca3af' : '#fff'),
+                            fontSize: '11px',
+                            padding: '8px 12px',
+                            cursor: (isInterview || isDone) ? 'default' : 'pointer',
+                            border: isInterview ? '1px solid #1d4ed8' : 'none'
+                          }}
+                        >
+                          {isInterview ? "In Interview" : "Move to Interview"}
+                        </button>
+                        <button
+                          className="pill-button"
+                          onClick={() => !isRejected && handleReject(candidate.candidate_id)}
+                          disabled={isRejected}
+                          style={{
+                            flex: 1,
+                            background: isRejected ? '#fee2e2' : (isOffered ? '#f3f4f6' : '#d90429'),
+                            color: isRejected ? '#991b1b' : (isOffered ? '#9ca3af' : '#fff'),
+                            fontSize: '11px',
+                            padding: '8px 12px',
+                            cursor: (isRejected || isOffered) ? 'default' : 'pointer',
+                            border: isRejected ? '1px solid #991b1b' : 'none'
+                          }}
+                        >
+                          {isRejected ? "Rejected" : "Reject"}
+                        </button>
+                      </div>
+                      {!isDone && (
+                        <button
+                          className="pill-button"
+                          onClick={() => handleOverride(candidate.candidate_id, candidate.rank)}
+                        >
+                          Override
+                        </button>
+                      )}
                     </div>
                   </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    <button 
-                      className="pill-button" 
-                      onClick={() => handleMoveToInterview(candidate.candidate_id)}
-                      disabled={movedCandidates[candidate.candidate_id]}
-                      style={{ 
-                        background: movedCandidates[candidate.candidate_id] ? '#e2e8f0' : '#fff', 
-                        color: movedCandidates[candidate.candidate_id] ? '#64748b' : 'var(--brand-blue)',
-                        cursor: movedCandidates[candidate.candidate_id] ? 'not-allowed' : 'pointer'
-                      }}
-                    >
-                      {movedCandidates[candidate.candidate_id] ? "✓ In Interview" : "Move to Interview"}
-                    </button>
-                    <button 
-                      className="pill-button" 
-                      onClick={() => handleOverride(candidate.candidate_id, candidate.rank)}
-                    >
-                      Override
-                    </button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>

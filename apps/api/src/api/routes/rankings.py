@@ -281,10 +281,10 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
     # 3. Fetch extracted candidates linked to this job (scoped to org_id)
     candidate_rows = database.fetchall(
         """
-        SELECT c.id, s.profile_json, s.id
+        SELECT c.id, s.profile_json, s.id, c.status
         FROM candidates c
         JOIN candidate_snapshots s ON c.id = s.candidate_id
-        WHERE c.status IN ('extracted', 'interview', 'interviewing')
+        WHERE (c.status IN ('extracted', 'interview', 'interviewing', 'offered', 'rejected', 'active', 'failed') OR c.status IS NULL)
           AND s.profile_json->>'job_id' = %s
           AND c.org_id = %s
         """,
@@ -433,7 +433,8 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
             "name": cand_name,
             "cand_features": cand_score_features,
             "job_features": job_score_features,
-            "category_scores": cand_category_scores
+            "category_scores": cand_category_scores,
+            "status": row[3]
         }
         decision_inputs.append(
             DecisionInput(
@@ -446,6 +447,62 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
         
     # 5. Rank
     decisions = decider.rank(decision_inputs, threshold=40.0)
+    
+    # Fetch overrides for this job (by joining ranking_runs and ranking_overrides)
+    overrides_rows = database.fetchall(
+        """
+        SELECT DISTINCT ON (o.candidate_snapshot_id) o.candidate_snapshot_id, o.new_rank
+        FROM ranking_overrides o
+        JOIN ranking_runs r ON o.ranking_run_id = r.id
+        JOIN job_versions jv ON r.job_version_id = jv.id
+        WHERE jv.job_id = %s
+        ORDER BY o.candidate_snapshot_id, o.created_at DESC
+        """,
+        [job_id]
+    )
+    overrides = {str(row[0]): row[1] for row in overrides_rows}
+    cand_overrides = {}
+    for cand_id, snap_id in candidate_snapshots.items():
+        if str(snap_id) in overrides:
+            cand_overrides[cand_id] = overrides[str(snap_id)]
+            
+    if cand_overrides:
+        decisions = sorted(decisions, key=lambda d: d.rank)
+        n = len(decisions)
+        result = [None] * n
+        overridden_placed = set()
+        for d in decisions:
+            if d.candidate_id in cand_overrides:
+                new_r = cand_overrides[d.candidate_id]
+                idx = min(max(0, new_r - 1), n - 1)
+                while idx < n and result[idx] is not None:
+                    idx += 1
+                if idx < n:
+                    result[idx] = d
+                    overridden_placed.add(d.candidate_id)
+                else:
+                    for free_idx in range(n):
+                        if result[free_idx] is None:
+                            result[free_idx] = d
+                            overridden_placed.add(d.candidate_id)
+                            break
+        non_overridden = [d for d in decisions if d.candidate_id not in overridden_placed]
+        non_overridden_idx = 0
+        for i in range(n):
+            if result[i] is None and non_overridden_idx < len(non_overridden):
+                result[i] = non_overridden[non_overridden_idx]
+                non_overridden_idx += 1
+        from services.decision.models import DecisionOutput
+        result = [
+            DecisionOutput(
+                candidate_id=d.candidate_id,
+                rank=index,
+                decision=d.decision,
+                triggers=d.triggers
+            )
+            for index, d in enumerate(result, start=1)
+        ]
+        decisions = result
     
     ranked = []
     output_records = []
@@ -472,7 +529,8 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
                 score=cand_info["score"],
                 rank=d.rank,
                 explanation_text=explanation,
-                category_scores=cand_info.get("category_scores", {})
+                category_scores=cand_info.get("category_scores", {}),
+                status=cand_info.get("status")
             )
         )
 
@@ -573,12 +631,15 @@ def simulate_ranking(
         scored_category = {}
         candidate_lookup = {c.candidate_id: c for c in payload.candidates}
 
+        candidate_statuses = {}
         for candidate in payload.candidates:
             snap_row = database.fetchone(
-                "SELECT s.id, s.profile_json FROM candidate_snapshots s JOIN candidates c ON s.candidate_id = c.id WHERE s.candidate_id = %s AND c.org_id = %s ORDER BY s.snapshot_version DESC LIMIT 1",
+                "SELECT s.id, s.profile_json, c.status FROM candidate_snapshots s JOIN candidates c ON s.candidate_id = c.id WHERE s.candidate_id = %s AND c.org_id = %s ORDER BY s.snapshot_version DESC LIMIT 1",
                 [candidate.candidate_id, security.org_id]
             )
             snap_id = snap_row[0] if snap_row else candidate.candidate_id
+            cand_status = snap_row[2] if snap_row and len(snap_row) > 2 else "extracted"
+            candidate_statuses[candidate.candidate_id] = cand_status
             profile_json = snap_row[1] if snap_row and snap_row[1] else {}
             if isinstance(profile_json, str):
                 try:
@@ -689,7 +750,8 @@ def simulate_ranking(
                     score=scored.get(item.candidate_id, 0.0),
                     rank=item.rank,
                     explanation_text=explanation,
-                    category_scores=cand_category_scores
+                    category_scores=cand_category_scores,
+                    status=candidate_statuses.get(item.candidate_id, "extracted")
                 )
             )
             output_records.append(
@@ -713,10 +775,10 @@ def simulate_ranking(
 
         candidate_rows = database.fetchall(
             """
-            SELECT c.id, s.profile_json, s.id
+            SELECT c.id, s.profile_json, s.id, c.status
             FROM candidates c
             JOIN candidate_snapshots s ON c.id = s.candidate_id
-            WHERE c.status IN ('extracted', 'interview', 'interviewing')
+            WHERE (c.status IN ('extracted', 'interview', 'interviewing', 'offered', 'rejected', 'active', 'failed') OR c.status IS NULL)
               AND s.profile_json->>'job_id' = %s
               AND c.org_id = %s
             """,
@@ -838,7 +900,8 @@ def simulate_ranking(
                 "name": cand_name,
                 "cand_features": cand_score_features,
                 "job_features": job_score_features,
-                "category_scores": cand_category_scores
+                "category_scores": cand_category_scores,
+                "status": row[3]
             }
             decision_inputs.append(
                 DecisionInput(
@@ -873,7 +936,8 @@ def simulate_ranking(
                     score=cand_info["score"],
                     rank=d.rank,
                     explanation_text=explanation,
-                    category_scores=cand_info.get("category_scores", {})
+                    category_scores=cand_info.get("category_scores", {}),
+                    status=cand_info.get("status")
                 )
             )
 
@@ -907,9 +971,31 @@ def create_override(
     if not run_row:
         raise HTTPException(status_code=404, detail="Ranking run not found")
 
+    # Find the candidate snapshot evaluated in this run to satisfy foreign key constraint on candidate_snapshot_id
+    snap_row = database.fetchone(
+        """
+        SELECT s.id 
+        FROM candidate_snapshots s 
+        JOIN ranking_run_outputs o ON s.id = o.candidate_snapshot_id 
+        WHERE o.ranking_run_id = %s AND s.candidate_id = %s
+        """,
+        [run_id, payload.candidate_id]
+    )
+    if not snap_row:
+        # Fallback to the candidate's latest snapshot
+        snap_row = database.fetchone(
+            "SELECT id FROM candidate_snapshots WHERE candidate_id = %s ORDER BY created_at DESC LIMIT 1",
+            [payload.candidate_id]
+        )
+
+    if not snap_row:
+        raise HTTPException(status_code=404, detail="Candidate snapshot not found")
+
+    snapshot_id = str(snap_row[0])
+
     repo.write_override(
         run_id=run_id,
-        candidate_id=payload.candidate_id,
+        candidate_id=snapshot_id,
         old_rank=payload.old_rank,
         new_rank=payload.new_rank,
         reason=payload.reason,

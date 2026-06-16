@@ -113,6 +113,8 @@ def consume_resume_parsed(context: ConsumerContext, event: EventEnvelope) -> Non
     # Build a serialisable features dict for downstream consumers
     features_dict = {
         "name": extracted.name,
+        "email": extracted.email,
+        "phone": extracted.phone,
         "current_role": extracted.current_role,
         "skills": extracted.skills,
         "soft_skills": extracted.soft_skills,

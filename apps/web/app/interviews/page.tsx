@@ -149,7 +149,7 @@ export default function InterviewsPage() {
                     <div className="ranking-name" style={{ color: '#1b4332', fontWeight: 700 }}>{item?.candidate_name}</div>
                     <div className="ranking-desc" style={{ fontSize: '12px' }}>Resume Analysis & Tailored Questions Bank</div>
                   </div>
-                  <Link href={`/candidates/${candId}`}>
+                  <Link href={`/interviews/${candId}`}>
                     <button className="pill-button" style={{ fontSize: '11px' }}>
                       View Questions
                     </button>

@@ -20,6 +20,23 @@ async function uploadSingleCandidate(jobId: string, file: File) {
   return response.json();
 }
 
+/** Returns the candidate's current role/job title for display.
+ *  Legacy records may have email or phone stored in the current_role field,
+ *  so we filter those out and fall back to "Not Specified". */
+function getDisplayRole(role: string | undefined | null): string {
+  if (!role || role.trim() === "") return "Not Specified";
+  const r = role.trim();
+  // Reject values that look like email addresses
+  if (/@/.test(r)) return "Not Specified";
+  // Reject values that look like phone numbers (digit-heavy)
+  if (/^\+?[\d\s\-().]{7,}$/.test(r)) return "Not Specified";
+  // Reject values that start with "Email:" or "Phone:" (old format)
+  if (/^(email|phone)\s*:/i.test(r)) return "Not Specified";
+  // Reject values that contain "Email:" or "Phone:" substrings (pipe-separated old format)
+  if (/email\s*:/i.test(r) || /phone\s*:/i.test(r)) return "Not Specified";
+  return r;
+}
+
 export default function CandidatesPage() {
   const [candidates, setCandidates] = useState<any[]>([]);
   const [jobs, setJobs] = useState<any[]>([]);
@@ -204,7 +221,7 @@ export default function CandidatesPage() {
               <div className="ranking-avatar"></div>
               <div className="ranking-info">
                 <div className="ranking-name">{c.name} <span className="tag" style={{ marginLeft: 8 }}>{c.id.slice(0,8)}</span></div>
-                <div className="ranking-desc">{c.role} • Uploaded {new Date(c.created_at).toLocaleDateString()}</div>
+                <div className="ranking-desc">{getDisplayRole(c.role)} • Uploaded {new Date(c.created_at).toLocaleDateString()}</div>
               </div>
               <div className="tag">{c.status}</div>
               <Link href={`/candidates/${c.id}`}>

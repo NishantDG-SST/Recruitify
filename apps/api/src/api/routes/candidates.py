@@ -56,6 +56,197 @@ def upload_candidates(
     normalizer = TaxonomyNormalizer()
     extractor = ExtractionService(normalizer=normalizer, llm_client=llm)
 
+    def _is_rate_limit(exc: Exception) -> bool:
+        """Return True if the exception looks like a Groq/OpenAI 429."""
+        msg = str(exc).lower()
+        return "429" in msg or "rate limit" in msg or "rate_limit" in msg or "too many requests" in msg
+
+    def _get_fallback_name(text: str, filename: str) -> str:
+        import re
+        # 1. Try to extract name from filename (e.g., "01_arjun_sharma_senior_ml.txt" -> "Arjun Sharma")
+        name_parts = []
+        base = filename.rsplit('.', 1)[0]
+        # Split by underscores, hyphens, or spaces
+        parts = [p.strip() for p in re.split(r'[_ -]', base) if p.strip()]
+        for p in parts:
+            if p.isdigit():
+                continue
+            # Skip common descriptive words in filename (like senior, ml, fullstack, devops, mid, weak, etc.)
+            if p.lower() in {
+                "senior", "junior", "ml", "fullstack", "devops", "mid", "weak", "weak2",
+                "resume", "cv", "career", "change", "strong", "intern", "backend",
+                "frontend", "ds", "pm", "analyst", "sre", "product", "data"
+            }:
+                break
+            name_parts.append(p.capitalize())
+        if name_parts:
+            return " ".join(name_parts)
+        
+        # 2. Try first non-empty line from text
+        if text:
+            lines = [l.strip() for l in text.splitlines() if l.strip()]
+            if lines and len(lines[0]) < 50:
+                return lines[0]
+                
+        return "Unknown Candidate"
+
+    def _try_extract(text: str, filename: str, max_retries: int = 3):
+        """Attempt LLM extraction with retries. Returns (success, ExtractionResult or None)."""
+        last_extracted = None
+        last_err = None
+        for attempt in range(max_retries):
+            try:
+                candidate_extracted = extractor.extract(text)
+                last_extracted = candidate_extracted
+                # Validate completeness
+                has_role = bool(candidate_extracted.current_role and candidate_extracted.current_role.strip())
+                has_skills = bool(candidate_extracted.skills)
+                if not has_role:
+                    raise RuntimeError(
+                        f"Partial parse for {filename}: "
+                        f"name='{candidate_extracted.name}' current_role is empty "
+                        f"(skills={'present' if has_skills else 'also empty'})"
+                    )
+                return True, candidate_extracted
+            except Exception as e:
+                last_err = e
+                if attempt == max_retries - 1:
+                    logger.error(
+                        "All %d LLM extraction attempts failed for %s (%s).",
+                        max_retries, filename, last_err
+                    )
+                else:
+                    if _is_rate_limit(e):
+                        wait = 15 if attempt == 0 else 30
+                        logger.warning(
+                            "Rate limit hit for %s (attempt %d/%d) – backing off %ds",
+                            filename, attempt + 1, max_retries, wait
+                        )
+                    else:
+                        wait = 5 if attempt == 0 else 10
+                        logger.warning(
+                            "Extraction attempt %d/%d failed for %s (%s) – retrying in %ds",
+                            attempt + 1, max_retries, filename, str(e), wait
+                        )
+                    time.sleep(wait)
+        return False, last_extracted
+
+    def _save_extracted(extracted, snapshot, result, upload_filename: str):
+        """Persist extracted features and embeddings to DB."""
+        features = {
+            "name": extracted.name,
+            "current_role": extracted.current_role,
+            "skills": extracted.skills,
+            "soft_skills": extracted.soft_skills,
+            "roles": extracted.roles,
+            "domains": extracted.domains,
+            "years_experience": extracted.years_experience,
+            "education_level": extracted.education_level,
+            "certifications": extracted.certifications,
+            "career_trajectory": extracted.career_trajectory,
+            "extraction_method": extracted.extraction_method,
+        }
+        database.execute(
+            "UPDATE candidate_snapshots SET profile_json = profile_json || %s::jsonb WHERE id = %s",
+            [json.dumps(features), snapshot.candidate_snapshot_id]
+        )
+        database.execute(
+            "UPDATE candidates SET status = 'extracted' WHERE id = %s",
+            [snapshot.candidate_id]
+        )
+        logger.info("Extracted %s -> %s", upload_filename, extracted.name)
+
+        # Generate and write candidate embeddings synchronously
+        from services.models.embedding_repository import EmbeddingRepository, EmbeddingRecord
+        try:
+            skills_text = ", ".join(extracted.skills)
+            roles_text = ", ".join(extracted.roles)
+            embed_input = f"Skills: {skills_text}\nRoles: {roles_text}\n\n{result.parsed.text}".strip()
+            if not embed_input:
+                embed_input = "empty resume"
+
+            vectors = llm.embed([embed_input])
+            if vectors:
+                EmbeddingRepository(database).write(
+                    EmbeddingRecord(
+                        candidate_snapshot_id=snapshot.candidate_snapshot_id,
+                        embedding_model_id=settings.embedding_model,
+                        vector=vectors[0]
+                    )
+                )
+                logger.info("Generated and persisted embedding for candidate snapshot %s", snapshot.candidate_snapshot_id)
+        except Exception as emb_err:
+            logger.warning("Embedding generation failed for %s: %s", upload_filename, emb_err)
+
+    def _save_failed(partial, snapshot, result, upload_filename: str):
+        """Persist failed extraction to DB with partial data (at least name) and status = 'failed'."""
+        name = "Unknown Candidate"
+        current_role = None
+        skills = []
+        soft_skills = []
+        roles = []
+        domains = []
+        years_experience = 0
+        education_level = None
+        certifications = []
+        career_trajectory = ""
+        extraction_method = "failed"
+
+        if partial is not None:
+            if getattr(partial, "name", None):
+                name = partial.name
+            if getattr(partial, "current_role", None):
+                current_role = partial.current_role
+            if getattr(partial, "skills", None):
+                skills = partial.skills
+            if getattr(partial, "soft_skills", None):
+                soft_skills = partial.soft_skills
+            if getattr(partial, "roles", None):
+                roles = partial.roles
+            if getattr(partial, "domains", None):
+                domains = partial.domains
+            if getattr(partial, "years_experience", None):
+                years_experience = partial.years_experience
+            if getattr(partial, "education_level", None):
+                education_level = partial.education_level
+            if getattr(partial, "certifications", None):
+                certifications = partial.certifications
+            if getattr(partial, "career_trajectory", None):
+                career_trajectory = partial.career_trajectory
+            if getattr(partial, "extraction_method", None):
+                extraction_method = partial.extraction_method
+
+        # If name is still the default or empty, use fallback from filename/text
+        if not name or name == "Unknown Candidate":
+            name = _get_fallback_name(result.parsed.text, upload_filename)
+
+        features = {
+            "name": name,
+            "current_role": current_role,
+            "skills": skills,
+            "soft_skills": soft_skills,
+            "roles": roles,
+            "domains": domains,
+            "years_experience": years_experience,
+            "education_level": education_level,
+            "certifications": certifications,
+            "career_trajectory": career_trajectory,
+            "extraction_method": extraction_method,
+        }
+
+        database.execute(
+            "UPDATE candidate_snapshots SET profile_json = profile_json || %s::jsonb WHERE id = %s",
+            [json.dumps(features), snapshot.candidate_snapshot_id]
+        )
+        database.execute(
+            "UPDATE candidates SET status = 'failed' WHERE id = %s",
+            [snapshot.candidate_id]
+        )
+        logger.info("Saved failed extraction %s -> %s", upload_filename, name)
+
+    # ---- First pass: process all CVs ----
+    failed_items = []  # list of (filename, result, snapshot, partial) for retry
+
     for upload in files:
         content = upload.file.read()
         result = service.ingest(content, upload.filename or "resume", upload.content_type or "")
@@ -68,59 +259,22 @@ def upload_candidates(
         )
 
         # 2. Extract features synchronously via LLM
-        try:
-            extracted = extractor.extract(result.parsed.text)
-            features = {
-                "name": extracted.name,
-                "current_role": extracted.current_role,
-                "skills": extracted.skills,
-                "soft_skills": extracted.soft_skills,
-                "roles": extracted.roles,
-                "domains": extracted.domains,
-                "years_experience": extracted.years_experience,
-                "education_level": extracted.education_level,
-                "certifications": extracted.certifications,
-                "career_trajectory": extracted.career_trajectory,
-                "extraction_method": extracted.extraction_method,
-            }
-            # Update snapshot with extracted features
-            database.execute(
-                "UPDATE candidate_snapshots SET profile_json = profile_json || %s::jsonb WHERE id = %s",
-                [json.dumps(features), snapshot.candidate_snapshot_id]
-            )
-            # Mark candidate as extracted
-            database.execute(
-                "UPDATE candidates SET status = 'extracted' WHERE id = %s",
-                [snapshot.candidate_id]
-            )
-            logger.info("Extracted %s -> %s", upload.filename, extracted.name)
-            
-            # Generate and write candidate embeddings synchronously
-            from services.models.embedding_repository import EmbeddingRepository, EmbeddingRecord
-            try:
-                skills_text = ", ".join(extracted.skills)
-                roles_text = ", ".join(extracted.roles)
-                embed_input = f"Skills: {skills_text}\nRoles: {roles_text}\n\n{result.parsed.text}".strip()
-                if not embed_input:
-                    embed_input = "empty resume"
-                
-                vectors = llm.embed([embed_input])
-                if vectors:
-                    EmbeddingRepository(database).write(
-                        EmbeddingRecord(
-                            candidate_snapshot_id=snapshot.candidate_snapshot_id,
-                            embedding_model_id=settings.embedding_model,
-                            vector=vectors[0]
-                        )
-                    )
-                    logger.info("Generated and persisted embedding for candidate snapshot %s", snapshot.candidate_snapshot_id)
-            except Exception as emb_err:
-                logger.warning("Embedding generation failed for %s: %s", upload.filename, emb_err)
+        success, extracted_or_partial = _try_extract(result.parsed.text, upload.filename or "resume")
 
-            # Throttle to avoid Groq rate limits
-            time.sleep(2)
-        except Exception as e:
-            logger.warning("Extraction failed for %s, will retry via worker: %s", upload.filename, e)
+        if success:
+            try:
+                _save_extracted(extracted_or_partial, snapshot, result, upload.filename or "resume")
+            except Exception as e:
+                logger.warning("Post-extraction DB write failed for %s: %s", upload.filename, e)
+        else:
+            logger.warning(
+                "First-pass extraction failed for %s – will retry after batch completes.",
+                upload.filename
+            )
+            failed_items.append((upload.filename or "resume", result, snapshot, extracted_or_partial))
+
+        # Throttle between CVs to avoid Groq rate limits (5s gap)
+        time.sleep(5)
 
         # 3. Log event
         event_repo.append(
@@ -136,6 +290,37 @@ def upload_candidates(
                 "user_id": security.user_id
             },
         )
+
+    # ---- Retry pass: re-attempt any CVs that failed extraction ----
+    if failed_items:
+        logger.info(
+            "Retry pass: %d CVs failed first-pass extraction. "
+            "Waiting 30s for rate-limit window to recover...",
+            len(failed_items)
+        )
+        time.sleep(30)
+
+        for filename, result, snapshot, first_pass_partial in failed_items:
+            success, extracted_or_partial = _try_extract(result.parsed.text, filename, max_retries=3)
+            latest_partial = extracted_or_partial if extracted_or_partial is not None else first_pass_partial
+            
+            if success:
+                try:
+                    _save_extracted(extracted_or_partial, snapshot, result, filename)
+                    logger.info("Retry pass succeeded for %s", filename)
+                except Exception as e:
+                    logger.warning("Retry pass DB write failed for %s: %s", filename, e)
+            else:
+                logger.error(
+                    "Retry pass also failed for %s – saving candidate details with failed status.",
+                    filename
+                )
+                try:
+                    _save_failed(latest_partial, snapshot, result, filename)
+                except Exception as e:
+                    logger.error("Failed to save failed extraction state for %s: %s", filename, e)
+            # Throttle between retries too
+            time.sleep(5)
 
     return CandidateUploadResponse(batch_id=batch_id)
 
