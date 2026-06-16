@@ -26,29 +26,31 @@ Production-grade recruitment intelligence platform with AI-driven extraction, dy
 ## How to Run
 
 ### 1. Start Infrastructure
-Run the database and message broker:
+Ensure Docker is running. If updating from a previous version, clean up old containers and volumes first to ensure database schemas and seeds are re-applied:
 ```bash
+docker compose down -v
 docker compose up -d
 ```
 
-### 2. Start the Backend API
-The backend requires some environment variables to connect to Groq and Postgres:
+### 2. Configure Environment Variables
+Copy the environment variables template to a local `.env` file and insert your API keys (e.g. Groq, Gemini):
+```bash
+cp .env.example .env
+```
+
+### 3. Start the Backend API
+Create a Python virtual environment, install dependencies, and start the FastAPI service:
 ```bash
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
 # Run the API server
-DATABASE_DSN="postgresql://recruitment:recruitment@localhost:5432/recruitment" \
-STORAGE_ROOT="/tmp/recruitment-platform" \
-OPENAI_API_KEY="your_groq_api_key_here" \
-OPENAI_BASE_URL="https://api.groq.com/openai/v1" \
-LLM_MODEL="llama-3.1-8b-instant" \
-uvicorn apps.api.src.main:app --reload --port 8000
+PYTHONPATH=apps/api/src uvicorn main:app --reload --port 8000
 ```
 
-### 3. Start the Web UI
-In a separate terminal:
+### 4. Start the Web UI
+In a separate terminal, install Node dependencies and launch the Next.js development server:
 ```bash
 cd apps/web
 npm install
