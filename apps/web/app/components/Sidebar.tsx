@@ -2,11 +2,9 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useSession, signIn, signOut } from "next-auth/react";
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const { data: session } = useSession();
 
   return (
     <aside className="sidebar">
@@ -22,26 +20,27 @@ export default function Sidebar() {
       <div className="sidebar-bottom">
         <Link href="/settings" className={`nav-item ${pathname.startsWith('/settings') ? 'active' : ''}`}>Settings</Link>
         
-        {session ? (
-          <>
-            <div className="nav-item" onClick={() => signOut()} style={{ color: '#ffb87a' }}>Logout</div>
-            <div style={{ marginTop: '20px', display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <img 
-                src={session.user?.image || ""} 
-                alt="Profile" 
-                style={{ width: '40px', height: '40px', borderRadius: '50%', background: '#ffb87a', objectFit: 'cover' }} 
-              />
-              <div style={{ fontSize: '14px', lineHeight: '1.2' }}>
-                <strong>{session.user?.name?.split(' ')[0] || "User"}</strong><br/>
-                <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.6)' }}>Admin</span>
-              </div>
-            </div>
-          </>
-        ) : (
-          <div className="nav-item" onClick={() => signIn('google')} style={{ background: 'white', color: 'var(--bg-sidebar)', justifyContent: 'center' }}>
-            Login with Google
+        <div style={{ marginTop: '20px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <div 
+            style={{ 
+              width: '40px', 
+              height: '40px', 
+              borderRadius: '50%', 
+              background: '#ffb87a', 
+              display: 'flex', 
+              alignItems: 'center', 
+              justifyContent: 'center', 
+              fontWeight: 'bold', 
+              color: 'var(--bg-sidebar)' 
+            }}
+          >
+            DU
           </div>
-        )}
+          <div style={{ fontSize: '14px', lineHeight: '1.2' }}>
+            <strong>Demo User 1</strong><br/>
+            <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.6)' }}>Admin</span>
+          </div>
+        </div>
       </div>
     </aside>
   );

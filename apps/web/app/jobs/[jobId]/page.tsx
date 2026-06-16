@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { deleteJob } from "../../../lib/api";
+import { deleteJob } from "../../lib/api";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "/api";
 

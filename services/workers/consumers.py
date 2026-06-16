@@ -161,6 +161,15 @@ def consume_candidate_extracted(context: ConsumerContext, event: EventEnvelope) 
     if not snapshot_id:
         return None
 
+    # Guard: skip stale events whose snapshot was deleted
+    if context.database and context.database.is_configured and snapshot_id:
+        row = context.database.fetchone(
+            "SELECT 1 FROM candidate_snapshots WHERE id = %s", [snapshot_id]
+        )
+        if not row:
+            logger.warning("Skipping stale event – snapshot %s not found", snapshot_id)
+            return None
+
     # Build embedding input from full text + skills for richer representation
     resume_text = event.payload.get("resume_text", "")
     features = event.payload.get("features", {})
@@ -210,6 +219,15 @@ def consume_embedding_generated(context: ConsumerContext, event: EventEnvelope) 
     snapshot_id = event.payload.get("candidate_snapshot_id")
     if not snapshot_id:
         return None
+
+    # Guard: skip stale events whose snapshot was deleted
+    if context.database and context.database.is_configured and snapshot_id:
+        row = context.database.fetchone(
+            "SELECT 1 FROM candidate_snapshots WHERE id = %s", [snapshot_id]
+        )
+        if not row:
+            logger.warning("Skipping stale event – snapshot %s not found", snapshot_id)
+            return None
 
     # Mark embedding as ready in the feature store
     context.feature_store.write(

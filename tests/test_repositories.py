@@ -59,6 +59,7 @@ def test_candidate_and_ranking_repositories() -> None:
         org_id="00000000-0000-0000-0000-000000000001",
         job_version_id=job.job_version_id,
         scoring_version="v0",
+        created_by="00000000-0000-0000-0000-000000000002",
     )
 
     ranking_repo.write_outputs(
@@ -75,4 +76,4 @@ def test_candidate_and_ranking_repositories() -> None:
 
     outputs = ranking_repo.list_outputs(run.run_id)
     assert outputs
-    assert outputs[0].candidate_snapshot_id == snapshot.candidate_snapshot_id
+    assert str(outputs[0].candidate_snapshot_id) == str(snapshot.candidate_snapshot_id)

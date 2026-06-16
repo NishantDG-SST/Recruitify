@@ -247,14 +247,28 @@ def compute_soft_skills_score(cand_profile: dict, job_parsed: dict) -> float:
     return score
 
 
+def get_cached_explanation(database, job_version_id: str, snapshot_id: str) -> str | None:
+    row = database.fetchone(
+        """
+        SELECT o.explanation_text 
+        FROM ranking_run_outputs o
+        JOIN ranking_runs r ON o.ranking_run_id = r.id
+        WHERE r.job_version_id = %s AND o.candidate_snapshot_id = %s AND o.explanation_text IS NOT NULL AND o.explanation_text != ''
+        ORDER BY r.created_at DESC LIMIT 1
+        """,
+        [job_version_id, snapshot_id]
+    )
+    return row[0] if row else None
+
+
 @router.get("", response_model=RankingResponse)
 def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_context)) -> RankingResponse:
-    import os
     import logging
     logger = logging.getLogger(__name__)
 
-    # 1. Fetch Job from DB (scoped to org_id)
     database = get_database(settings.database_dsn)
+    
+    # 1. Fetch Job Version scoped to org_id
     job_row = database.fetchone(
         "SELECT jv.title, jv.parsed_json, jv.raw_text, jv.id FROM job_versions jv JOIN jobs j ON jv.job_id = j.id WHERE jv.job_id = %s AND j.org_id = %s ORDER BY jv.version DESC LIMIT 1",
         [job_id, security.org_id]
@@ -262,23 +276,129 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
     if not job_row:
         raise HTTPException(status_code=404, detail="Job not found")
         
-    job_title = job_row[0] if job_row else "Unknown Job"
-    
-    parsed_json = job_row[1] if job_row and len(job_row) > 1 and job_row[1] else {}
+    job_title, parsed_json, job_raw_text, job_version_id = job_row
     if isinstance(parsed_json, str):
         try:
             parsed_json = json.loads(parsed_json)
         except json.JSONDecodeError:
             parsed_json = {}
-            
-    # 2. Extract job features dynamically from the parsed job description
+
+    # Define list of job skills for category calculations
+    must_have = parsed_json.get("must_have_skills") or []
+    nice_to_have = parsed_json.get("nice_to_have_skills") or []
+    job_skills_list = must_have + nice_to_have
+
+    # 2. Fetch current candidate snapshots for this job
+    candidate_rows = database.fetchall(
+        """
+        SELECT c.id, s.profile_json, s.id
+        FROM candidates c
+        JOIN candidate_snapshots s ON c.id = s.candidate_id
+        WHERE c.status IN ('extracted', 'interview', 'interviewing')
+          AND s.profile_json->>'job_id' = %s
+          AND c.org_id = %s
+        """,
+        [job_id, security.org_id]
+    )
+    current_snapshots = {row[2] for row in candidate_rows}
+    
+    # 3. Check for the latest completed ranking run for this job version
+    latest_run_row = database.fetchone(
+        """
+        SELECT id FROM ranking_runs 
+        WHERE job_version_id = %s AND status = 'completed' AND org_id = %s
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        [job_version_id, security.org_id]
+    )
+    
+    if latest_run_row:
+        latest_run_id = latest_run_row[0]
+        repo = RankingRepository(database)
+        run_outputs = repo.list_outputs(latest_run_id)
+        if run_outputs:
+            run_snapshots = {str(o.candidate_snapshot_id) for o in run_outputs}
+            current_snapshots_str = {str(sid) for sid in current_snapshots}
+            # If the sets of candidate snapshots are identical, return cached outputs
+            if run_snapshots == current_snapshots_str:
+                ranked_candidates = []
+                sorted_outputs = sorted(run_outputs, key=lambda x: x.rank)
+                for o in sorted_outputs:
+                    cand_row = database.fetchone(
+                        "SELECT candidate_id, profile_json FROM candidate_snapshots WHERE id = %s",
+                        [o.candidate_snapshot_id]
+                    )
+                    cand_id = cand_row[0] if cand_row else ""
+                    profile_json = cand_row[1] if cand_row and cand_row[1] else {}
+                    if isinstance(profile_json, str):
+                        try:
+                            profile_json = json.loads(profile_json)
+                        except:
+                            profile_json = {}
+                    
+                    cand_name = profile_json.get("name", "Unknown Candidate")
+                    
+                    # Compute category scores
+                    hard_skills_score = semantic_skill_match_score(profile_json.get("skills", []), job_skills_list)
+                    soft_skills_score = compute_soft_skills_score(profile_json, parsed_json)
+                    experience_score = compute_experience_score(profile_json, parsed_json)
+                    domain_score = compute_domain_score(profile_json, parsed_json)
+                    
+                    ranked_candidates.append(
+                        RankingCandidate(
+                            candidate_id=str(cand_id),
+                            candidate_name=cand_name,
+                            score=o.final_score,
+                            rank=o.rank,
+                            explanation_text=o.explanation_text,
+                            category_scores={
+                                "hard_skills": hard_skills_score,
+                                "soft_skills": soft_skills_score,
+                                "experience": experience_score,
+                                "domain_knowledge": domain_score
+                            }
+                        )
+                    )
+                logger.info("Returning cached ranking run %s from database", latest_run_id)
+                return RankingResponse(run_id=str(latest_run_id), candidates=ranked_candidates)
+
+    # If no cached run exists or it doesn't match the current candidate set, return empty list
+    logger.info("No matching cached ranking run found for job version %s", job_version_id)
+    return RankingResponse(run_id="", candidates=[])
+
+
+@router.post("", response_model=RankingResponse)
+def generate_rankings(job_id: str, security: SecurityContext = Depends(get_security_context)) -> RankingResponse:
+    import os
+    import logging
+    logger = logging.getLogger(__name__)
+
+    database = get_database(settings.database_dsn)
+    
+    # 1. Fetch Job Version scoped to org_id
+    job_row = database.fetchone(
+        "SELECT jv.title, jv.parsed_json, jv.raw_text, jv.id FROM job_versions jv JOIN jobs j ON jv.job_id = j.id WHERE jv.job_id = %s AND j.org_id = %s ORDER BY jv.version DESC LIMIT 1",
+        [job_id, security.org_id]
+    )
+    if not job_row:
+        raise HTTPException(status_code=404, detail="Job not found")
+        
+    job_title, parsed_json, job_raw_text, job_version_id = job_row
+    if isinstance(parsed_json, str):
+        try:
+            parsed_json = json.loads(parsed_json)
+        except json.JSONDecodeError:
+            parsed_json = {}
+
+    # Define list of job skills for category calculations
     must_have = parsed_json.get("must_have_skills") or []
     nice_to_have = parsed_json.get("nice_to_have_skills") or []
     job_skills = [s.lower() for s in (must_have + nice_to_have)]
     job_exp = parsed_json.get("years_experience_min", 0) or 0
     must_have_skills = [s.lower() for s in must_have]
-    
-    # 3. Fetch extracted candidates linked to this job (scoped to org_id)
+    job_skills_list = must_have + nice_to_have
+
+    # 2. Fetch extracted candidates linked to this job (scoped to org_id)
     candidate_rows = database.fetchall(
         """
         SELECT c.id, s.profile_json, s.id
@@ -309,7 +429,6 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
     # Generate job embedding dynamically
     job_embedding_vector = [0.0] * 768
     try:
-        job_raw_text = job_row[2] if len(job_row) > 2 and job_row[2] else ""
         if job_raw_text:
             skills_text = ", ".join(must_have + nice_to_have)
             job_text_input = f"Job Title: {job_title}\nSkills required: {skills_text}\nDescription: {job_raw_text}".strip()
@@ -322,7 +441,6 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
 
     # Initialize Ranking Repository and create run
     repo = RankingRepository(database)
-    job_version_id = job_row[3] if job_row and len(job_row) > 3 else job_id
     run = repo.create_run(
         org_id=security.org_id,
         job_version_id=job_version_id,
@@ -360,7 +478,7 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
             "education": 1.0
         }
         
-        # Include individual must-haves in features so that passed_must_have checks work
+        # Include individual must-haves in features
         for mh in must_have_skills:
             cand_score_features[mh] = 1.0 if mh in cand_skills else 0.0
             job_score_features[mh] = 1.0
@@ -378,8 +496,7 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
             cand_embedding_vector = val
             logger.info("Loaded real embedding for candidate snapshot %s", snap_id)
 
-        # Calculate consistent category scores using semantic matching
-        job_skills_list = (parsed_json.get("must_have_skills") or []) + (parsed_json.get("nice_to_have_skills") or [])
+        # Calculate consistent category scores
         hard_skills_score = semantic_skill_match_score(profile.get("skills", []), job_skills_list)
         soft_skills_score = compute_soft_skills_score(profile, parsed_json)
         experience_score = compute_experience_score(profile, parsed_json)
@@ -387,7 +504,7 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
 
         name_lower = cand_name.lower()
 
-        # 4. Run Matching & Scoring
+        # Run Matching
         match_result = matcher.match(
             MatchInput(
                 candidate_features=cand_score_features,
@@ -440,11 +557,11 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
                 candidate_id=cand_id,
                 final_score=score_result.final_score,
                 passed_must_have=score_result.passed_must_have,
-                category_scores=score_result.category_scores
+                category_scores=cand_category_scores
             )
         )
         
-    # 5. Rank
+    # Rank
     decisions = decider.rank(decision_inputs, threshold=40.0)
     
     ranked = []
@@ -453,17 +570,33 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
         cand_info = scored_candidates[d.candidate_id]
         snap_id = candidate_snapshots[d.candidate_id]
         
-        # Generate candidate-specific explanation
-        explanation = explainer.generate(
-            candidate_id=d.candidate_id,
-            job_features=cand_info["job_features"],
-            candidate_features=cand_info["cand_features"],
-            score=cand_info["score"],
-            decision=d.decision,
-            triggers=d.triggers,
-            rank=d.rank,
-            candidate_name=cand_info["name"],
-        )
+        # Cache Lookup: Check for previously generated explanation
+        explanation = get_cached_explanation(database, job_version_id, snap_id)
+        if explanation:
+            logger.info("Reusing cached explanation for snapshot %s", snap_id)
+        else:
+            # Generate explanation via LLM ONLY if rank is <= 5, otherwise use fast fallback
+            if d.rank <= 5:
+                explanation = explainer.generate(
+                    candidate_id=d.candidate_id,
+                    job_features=cand_info["job_features"],
+                    candidate_features=cand_info["cand_features"],
+                    score=cand_info["score"],
+                    decision=d.decision,
+                    triggers=d.triggers,
+                    rank=d.rank,
+                    candidate_name=cand_info["name"],
+                )
+            else:
+                explanation = explainer._generate_fallback(
+                    score=cand_info["score"],
+                    decision=d.decision,
+                    triggers=d.triggers,
+                    candidate_features=cand_info["cand_features"],
+                    job_features=cand_info["job_features"],
+                    rank=d.rank,
+                    candidate_name=cand_info["name"],
+                )
         
         ranked.append(
             RankingCandidate(
@@ -671,16 +804,33 @@ def simulate_ranking(
             candidate_name = profile_json.get("name") or "Unknown Candidate"
             cand_category_scores = scored_category.get(item.candidate_id, {})
 
-            explanation = explainer.generate(
-                candidate_id=item.candidate_id,
-                job_features=cand_input.job_features,
-                candidate_features=cand_input.candidate_features,
-                score=scored.get(item.candidate_id, 0.0),
-                decision=item.decision,
-                triggers=item.triggers,
-                rank=item.rank,
-                candidate_name=candidate_name,
-            )
+            # Cache Lookup: Check for previously generated explanation
+            explanation = get_cached_explanation(database, job_version_id, snap_id)
+            if explanation:
+                logger.info("Reusing cached explanation for snapshot %s in simulation", snap_id)
+            else:
+                # Generate explanation via LLM ONLY if rank is <= 5, otherwise use fast fallback
+                if item.rank <= 5:
+                    explanation = explainer.generate(
+                        candidate_id=item.candidate_id,
+                        job_features=cand_input.job_features,
+                        candidate_features=cand_input.candidate_features,
+                        score=scored.get(item.candidate_id, 0.0),
+                        decision=item.decision,
+                        triggers=item.triggers,
+                        rank=item.rank,
+                        candidate_name=candidate_name,
+                    )
+                else:
+                    explanation = explainer._generate_fallback(
+                        score=scored.get(item.candidate_id, 0.0),
+                        decision=item.decision,
+                        triggers=item.triggers,
+                        candidate_features=cand_input.candidate_features,
+                        job_features=cand_input.job_features,
+                        rank=item.rank,
+                        candidate_name=candidate_name,
+                    )
             
             ranked.append(
                 RankingCandidate(
@@ -855,16 +1005,33 @@ def simulate_ranking(
             cand_info = scored_candidates[d.candidate_id]
             snap_id = candidate_snapshots[d.candidate_id]
             
-            explanation = explainer.generate(
-                candidate_id=d.candidate_id,
-                job_features=cand_info["job_features"],
-                candidate_features=cand_info["cand_features"],
-                score=cand_info["score"],
-                decision=d.decision,
-                triggers=d.triggers,
-                rank=d.rank,
-                candidate_name=cand_info["name"],
-            )
+            # Cache Lookup: Check for previously generated explanation
+            explanation = get_cached_explanation(database, job_version_id, snap_id)
+            if explanation:
+                logger.info("Reusing cached explanation for snapshot %s in simulation (no candidates payload)", snap_id)
+            else:
+                # Generate explanation via LLM ONLY if rank is <= 5, otherwise use fast fallback
+                if d.rank <= 5:
+                    explanation = explainer.generate(
+                        candidate_id=d.candidate_id,
+                        job_features=cand_info["job_features"],
+                        candidate_features=cand_info["cand_features"],
+                        score=cand_info["score"],
+                        decision=d.decision,
+                        triggers=d.triggers,
+                        rank=d.rank,
+                        candidate_name=cand_info["name"],
+                    )
+                else:
+                    explanation = explainer._generate_fallback(
+                        score=cand_info["score"],
+                        decision=d.decision,
+                        triggers=d.triggers,
+                        candidate_features=cand_info["cand_features"],
+                        job_features=cand_info["job_features"],
+                        rank=d.rank,
+                        candidate_name=cand_info["name"],
+                    )
             
             ranked.append(
                 RankingCandidate(

@@ -4,9 +4,9 @@ import { useState, useRef } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "/api";
 
-async function uploadSingleCandidate(jobId: string, file: File) {
+async function uploadMultipleCandidates(jobId: string, files: File[]) {
   const form = new FormData();
-  form.append("files", file);
+  files.forEach(file => form.append("files", file));
   const response = await fetch(`${API_BASE}/jobs/${jobId}/candidates`, {
     method: "POST",
     body: form,
@@ -32,20 +32,16 @@ export default function CandidateUploadPage({ params }: { params: { jobId: strin
     }
     setIsUploading(true);
     setUploadResults(null);
-    const total = files.length;
+    setStatus(`Uploading and processing ${files.length} resumes...`);
     let successCount = 0;
     const failedFiles: string[] = [];
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      setStatus(`Processing ${i + 1} of ${total}: ${file.name}`);
-      try {
-        await uploadSingleCandidate(params.jobId, file);
-        successCount++;
-      } catch (err: any) {
-        console.error(`Upload failed for ${file.name}:`, err);
-        failedFiles.push(file.name);
-      }
+    try {
+      await uploadMultipleCandidates(params.jobId, files);
+      successCount = files.length;
+    } catch (err: any) {
+      console.error("Batch upload failed:", err);
+      files.forEach(f => failedFiles.push(f.name));
     }
 
     setStatus(null);
