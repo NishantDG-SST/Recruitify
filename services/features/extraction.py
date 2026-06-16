@@ -31,7 +31,7 @@ from the resume text provided.  Return a JSON object with exactly these keys:
   "roles": ["list of job titles the candidate has held"],
   "domains": ["list of industry domains or sectors"],
   "years_experience": <integer – total years of professional experience>,
-  "education_level": "<high_school | bachelors | masters | phd | unknown>",
+  "education_level": "<high_school | associates | bachelors | masters | phd | unknown>",
   "certifications": ["list of certifications mentioned"],
   "career_trajectory": "<ascending | lateral | mixed | early_career>"
 }
@@ -87,6 +87,7 @@ _EDUCATION_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"(?:^|\s)b\.?\s?s\.?c?\.?(?:\s|,|$)", re.IGNORECASE), "bachelors"),
     (re.compile(r"(?:^|\s)b\.?\s?tech\b", re.IGNORECASE), "bachelors"),
     (re.compile(r"(?:^|\s)b\.?\s?a\.?(?:\s|,|$)", re.IGNORECASE), "bachelors"),
+    (re.compile(r"\bassociates?\b", re.IGNORECASE), "associates"),
 ]
 
 _YEARS_PATTERN = re.compile(r"(\d{1,2})\+?\s*(?:years?|yrs?)\s*(?:of\s+)?(?:experience)?", re.IGNORECASE)

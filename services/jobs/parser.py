@@ -30,7 +30,7 @@ Return a JSON object with exactly these keys:
   "soft_skills": ["list of required soft skills (e.g., leadership, communication)"],
   "domains": ["list of industry domains or sectors mentioned"],
   "years_experience_min": <integer – minimum years of experience required, use 0 if not specified>,
-  "education_level": "<high_school | bachelors | masters | phd | unknown>",
+  "education_level": "<high_school | associates | bachelors | masters | phd | unknown>",
   "certifications": ["list of required or preferred certifications"]
 }
 
