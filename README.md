@@ -39,9 +39,10 @@ cp .env.example .env
 ```
 
 ### 3. Start the Backend API
-Create a Python virtual environment, install dependencies, and start the FastAPI service:
+From the **root directory** of the project, create a Python virtual environment (use `python3` on macOS/Linux), install dependencies, and start the FastAPI service:
 ```bash
-python -m venv venv
+# Make sure you are in the root of the repository
+python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
