@@ -11,10 +11,13 @@ def setup_database() -> None:
     if not dsn:
         pytest.skip("DATABASE_DSN is not set")
     schema_path = Path(__file__).resolve().parents[1] / "db" / "schema.sql"
-    seed_path = Path(__file__).resolve().parent / "sql" / "seed.sql"
+    dev_seed_path = Path(__file__).resolve().parents[1] / "db" / "seed.sql"
+    test_seed_path = Path(__file__).resolve().parent / "sql" / "seed.sql"
 
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cursor:
+            cursor.execute("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;")
             cursor.execute(schema_path.read_text())
-            cursor.execute(seed_path.read_text())
+            cursor.execute(dev_seed_path.read_text())
+            cursor.execute(test_seed_path.read_text())
         conn.commit()

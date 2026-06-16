@@ -26,8 +26,8 @@ from the resume text provided.  Return a JSON object with exactly these keys:
 {
   "name": "<candidate full name>",
   "current_role": "<candidate's most recent or current role>",
-  "technical_skills": ["list of technical skills, tools, languages, frameworks"],
-  "soft_skills": ["list of soft skills like leadership, communication"],
+  "skills": ["list of technical skills, tools, languages, frameworks, methodologies, and core competencies"],
+  "soft_skills": ["list of soft skills and interpersonal attributes like leadership, communication"],
   "roles": ["list of job titles the candidate has held"],
   "domains": ["list of industry domains or sectors"],
   "years_experience": <integer – total years of professional experience>,
@@ -39,6 +39,9 @@ from the resume text provided.  Return a JSON object with exactly these keys:
 Rules:
 - Only include skills and roles clearly evidenced in the text.
 - Normalise skill names to their most common form (e.g. 'JS' → 'javascript').
+- **Current Role Rule:** `current_role` MUST be the candidate's actual most recent/current job title listed in their chronological work experience section. Do NOT extract descriptive, target, or self-proclaimed titles from the Professional Summary or Objective sections if they differ from the actual latest title on the timeline.
+- **Compound Skill Rule:** Do NOT split compound or brand name tools into individual components (e.g., "SAP Concur" is a single expense management tool and must be extracted as "SAP Concur" or "Concur expense", but NEVER split into "SAP" and "Concur" as two separate skills).
+- **Hard Skills vs Soft Skills Rule:** Do NOT place core professional/technical competencies, methodologies, or tools (e.g., Clinical Operations, Vendor Management, Budget Tracking, Contract Negotiation, Pass-Through Expenses, Merchandising, Retail Management, Loss Prevention, Git, Agile) into "soft_skills". These are professional competencies/methodologies/tools and MUST go into "skills". Only interpersonal/behavioral skills (e.g. leadership, communication, teamwork, adaptability) should go into "soft_skills".
 - years_experience should be your best integer estimate; use 0 if unclear.
 - Return ONLY valid JSON, no markdown fences."""
 
@@ -136,22 +139,47 @@ class ExtractionService:
 
     def extract(self, text: str) -> ExtractionResult:
         """Extract features from *text*, using LLM when possible."""
+        cleaned_text = self._clean_and_truncate_text(text)
         if self._llm is not None and self._llm.is_available:
-            return self._extract_llm(text)
-        return self._extract_keywords(text)
+            return self._extract_llm(cleaned_text)
+        return self._extract_keywords(cleaned_text)
+
+    def _clean_and_truncate_text(self, text: str, max_chars: int = 12000) -> str:
+        if not text:
+            return ""
+        # Strip excessive whitespace and newlines
+        cleaned = " ".join(text.split())
+        return cleaned[:max_chars]
 
     # ------------------------------------------------------------------
     # LLM extraction
     # ------------------------------------------------------------------
 
     def _extract_llm(self, text: str) -> ExtractionResult:
-        try:
-            raw = self._llm.complete_json(EXTRACTION_SYSTEM_PROMPT, text[:12_000])
-        except Exception:
-            logger.exception("LLM extraction failed – falling back to keywords")
+        import time
+        import random
+        max_retries = 3
+        raw = None
+        for attempt in range(max_retries):
+            try:
+                raw = self._llm.complete_json(EXTRACTION_SYSTEM_PROMPT, text[:12_000])
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    delay = random.uniform(2.0, 5.0)
+                    logger.warning(
+                        "LLM extraction attempt %d failed: %s. Retrying in %.2fs...",
+                        attempt + 1, e, delay
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.exception("LLM extraction failed after all retries – falling back to keywords")
+                    return self._extract_keywords(text)
+
+        if not raw:
             return self._extract_keywords(text)
 
-        tech = [s.strip().lower() for s in raw.get("technical_skills", [])]
+        tech = [s.strip().lower() for s in (raw.get("skills") or raw.get("technical_skills") or [])]
         soft = [s.strip().lower() for s in raw.get("soft_skills", [])]
         normalized = self._normalizer.normalize_skills(tech)
 

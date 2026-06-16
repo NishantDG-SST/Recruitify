@@ -4,11 +4,11 @@ import time
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, File, UploadFile, status, Depends
+from fastapi import APIRouter, File, UploadFile, status, Depends, BackgroundTasks
 from typing import List, Any
 from pydantic import BaseModel
 
-from schemas.candidates import CandidateDetailResponse, CandidateUploadResponse
+from schemas.candidates import CandidateDetailResponse, CandidateUploadResponse, CandidateJobProfileResponse
 from core.config import settings
 from core.database import get_database
 from core.auth import SecurityContext, get_security_context
@@ -26,50 +26,48 @@ from api.routes.rankings import (
     compute_soft_skills_score,
     compute_domain_score,
     compute_experience_score,
+    _canonicalize,
 )
 
 router = APIRouter(prefix="/jobs/{job_id}/candidates", tags=["candidates"])
 logger = logging.getLogger(__name__)
 
 
-@router.post("", response_model=CandidateUploadResponse, status_code=status.HTTP_202_ACCEPTED)
-def upload_candidates(
-    job_id: str,
-    files: list[UploadFile] = File(...),
-    security: SecurityContext = Depends(get_security_context)
-) -> CandidateUploadResponse:
-    database = get_database(settings.database_dsn)
-    candidate_repo = CandidateRepository(database)
-    event_repo = EventRepository(database)
-    batch_id = str(uuid.uuid4())
-    parser = DocumentParser()
-    storage = LocalDocumentStorage(LocalStorageConfig(root_dir=Path(settings.storage_root)))
-    service = DocumentService(storage=storage, parser=parser)
+def process_candidates_batch_background(
+    snapshots_data: list[dict],
+    settings_db_dsn: str,
+    settings_llm_api_key: str,
+    settings_llm_base_url: str,
+    settings_llm_model: str,
+    settings_embedding_model: str,
+):
+    from core.database import get_database
+    from services.llm.client import LLMClient, LLMConfig
+    from services.taxonomy.normalizer import TaxonomyNormalizer
+    from services.features.extraction import ExtractionService
+    from services.models.embedding_repository import EmbeddingRepository, EmbeddingRecord
+    import json
+    import time
 
-    # Build the LLM extractor for synchronous parsing
+    database = get_database(settings_db_dsn)
+    
     llm_config = LLMConfig(
-        api_key=settings.llm_api_key,
-        base_url=settings.llm_base_url,
-        model=settings.llm_model,
+        api_key=settings_llm_api_key,
+        base_url=settings_llm_base_url,
+        model=settings_llm_model,
     )
     llm = LLMClient(llm_config)
     normalizer = TaxonomyNormalizer()
     extractor = ExtractionService(normalizer=normalizer, llm_client=llm)
 
-    for upload in files:
-        content = upload.file.read()
-        result = service.ingest(content, upload.filename or "resume", upload.content_type or "")
+    for snapshot in snapshots_data:
+        candidate_id = snapshot["candidate_id"]
+        snapshot_id = snapshot["snapshot_id"]
+        raw_text = snapshot["raw_text"]
+        filename = snapshot["filename"]
 
-        # 1. Create snapshot with raw text
-        snapshot = candidate_repo.create_snapshot(
-            org_id=security.org_id,
-            profile_json={"raw_text": result.parsed.text, "warnings": result.parsed.warnings, "job_id": job_id},
-            resume_document_id=result.stored.document_id,
-        )
-
-        # 2. Extract features synchronously via LLM
         try:
-            extracted = extractor.extract(result.parsed.text)
+            extracted = extractor.extract(raw_text)
             features = {
                 "name": extracted.name,
                 "current_role": extracted.current_role,
@@ -86,21 +84,20 @@ def upload_candidates(
             # Update snapshot with extracted features
             database.execute(
                 "UPDATE candidate_snapshots SET profile_json = profile_json || %s::jsonb WHERE id = %s",
-                [json.dumps(features), snapshot.candidate_snapshot_id]
+                [json.dumps(features), snapshot_id]
             )
             # Mark candidate as extracted
             database.execute(
                 "UPDATE candidates SET status = 'extracted' WHERE id = %s",
-                [snapshot.candidate_id]
+                [candidate_id]
             )
-            logger.info("Extracted %s -> %s", upload.filename, extracted.name)
+            logger.info("Background extracted %s -> %s", filename, extracted.name)
             
-            # Generate and write candidate embeddings synchronously
-            from services.models.embedding_repository import EmbeddingRepository, EmbeddingRecord
+            # Generate and write candidate embeddings
             try:
                 skills_text = ", ".join(extracted.skills)
                 roles_text = ", ".join(extracted.roles)
-                embed_input = f"Skills: {skills_text}\nRoles: {roles_text}\n\n{result.parsed.text}".strip()
+                embed_input = f"Skills: {skills_text}\nRoles: {roles_text}\n\n{raw_text}".strip()
                 if not embed_input:
                     embed_input = "empty resume"
                 
@@ -108,21 +105,57 @@ def upload_candidates(
                 if vectors:
                     EmbeddingRepository(database).write(
                         EmbeddingRecord(
-                            candidate_snapshot_id=snapshot.candidate_snapshot_id,
-                            embedding_model_id=settings.embedding_model,
+                            candidate_snapshot_id=snapshot_id,
+                            embedding_model_id=settings_embedding_model,
                             vector=vectors[0]
                         )
                     )
-                    logger.info("Generated and persisted embedding for candidate snapshot %s", snapshot.candidate_snapshot_id)
+                    logger.info("Generated background embedding for candidate snapshot %s", snapshot_id)
             except Exception as emb_err:
-                logger.warning("Embedding generation failed for %s: %s", upload.filename, emb_err)
+                logger.warning("Embedding generation failed in background for %s: %s", filename, emb_err)
 
             # Throttle to avoid Groq rate limits
-            time.sleep(2)
+            time.sleep(0.2)
         except Exception as e:
-            logger.warning("Extraction failed for %s, will retry via worker: %s", upload.filename, e)
+            logger.error("Background extraction failed for %s: %s", filename, e)
+            try:
+                database.execute(
+                    "UPDATE candidates SET status = 'failed' WHERE id = %s",
+                    [candidate_id]
+                )
+            except Exception as db_err:
+                logger.error("Failed to mark candidate status as failed for %s: %s", candidate_id, db_err)
 
-        # 3. Log event
+
+@router.post("", response_model=CandidateUploadResponse, status_code=status.HTTP_202_ACCEPTED)
+def upload_candidates(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+    security: SecurityContext = Depends(get_security_context)
+) -> CandidateUploadResponse:
+    database = get_database(settings.database_dsn)
+    candidate_repo = CandidateRepository(database)
+    event_repo = EventRepository(database)
+    batch_id = str(uuid.uuid4())
+    parser = DocumentParser()
+    storage = LocalDocumentStorage(LocalStorageConfig(root_dir=Path(settings.storage_root)))
+    service = DocumentService(storage=storage, parser=parser)
+
+    snapshots_data = []
+
+    for upload in files:
+        content = upload.file.read()
+        result = service.ingest(content, upload.filename or "resume", upload.content_type or "")
+
+        # 1. Create snapshot with raw text (initial status set to 'processing' in repository)
+        snapshot = candidate_repo.create_snapshot(
+            org_id=security.org_id,
+            profile_json={"raw_text": result.parsed.text, "warnings": result.parsed.warnings, "job_id": job_id},
+            resume_document_id=result.stored.document_id,
+        )
+
+        # 2. Log event
         event_repo.append(
             org_id=security.org_id,
             event_type="RESUME_UPLOADED",
@@ -136,6 +169,24 @@ def upload_candidates(
                 "user_id": security.user_id
             },
         )
+
+        snapshots_data.append({
+            "candidate_id": snapshot.candidate_id,
+            "snapshot_id": snapshot.candidate_snapshot_id,
+            "raw_text": result.parsed.text,
+            "filename": upload.filename or "resume"
+        })
+
+    # Schedule the processing batch in the background
+    background_tasks.add_task(
+        process_candidates_batch_background,
+        snapshots_data=snapshots_data,
+        settings_db_dsn=settings.database_dsn,
+        settings_llm_api_key=settings.llm_api_key,
+        settings_llm_base_url=settings.llm_base_url,
+        settings_llm_model=settings.llm_model,
+        settings_embedding_model=settings.embedding_model,
+    )
 
     return CandidateUploadResponse(batch_id=batch_id)
 
@@ -347,3 +398,132 @@ def generate_interview_questions(
     )
     
     return {"status": "success", "questions_generated": len(questions_list)}
+
+
+@router.get("/{candidate_id}/profile", response_model=CandidateJobProfileResponse)
+def get_candidate_job_profile(
+    job_id: str,
+    candidate_id: str,
+    security: SecurityContext = Depends(get_security_context)
+) -> CandidateJobProfileResponse:
+    from fastapi import HTTPException
+    database = get_database(settings.database_dsn)
+    candidate_repo = CandidateRepository(database)
+    
+    # 1. Fetch Candidate
+    data = candidate_repo.get_candidate(candidate_id, org_id=security.org_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+        
+    profile = data.get("profile", {})
+    cand_name = profile.get("name", "Unknown Candidate")
+    cand_status = data.get("status", "processing")
+    
+    # 2. Fetch Job Details
+    job_row = database.fetchone(
+        "SELECT jv.title, jv.parsed_json, jv.id FROM job_versions jv JOIN jobs j ON jv.job_id = j.id WHERE jv.job_id = %s AND j.org_id = %s ORDER BY jv.version DESC LIMIT 1",
+        [job_id, security.org_id]
+    )
+    if not job_row:
+        raise HTTPException(status_code=404, detail="Job not found")
+        
+    job_title, parsed_json, job_version_id = job_row
+    if isinstance(parsed_json, str):
+        try:
+            parsed_json = json.loads(parsed_json)
+        except json.JSONDecodeError:
+            parsed_json = {}
+            
+    # 3. Calculate matched & missing skills
+    must_have = parsed_json.get("must_have_skills") or []
+    nice_to_have = parsed_json.get("nice_to_have_skills") or []
+    job_skills_list = must_have + nice_to_have
+    
+    cand_skills = profile.get("skills") or []
+    cand_canon = {_canonicalize(s) for s in cand_skills}
+    cand_raw = {s.lower().strip() for s in cand_skills}
+    
+    matched_skills = []
+    missing_skills = []
+    
+    for js in job_skills_list:
+        js_canon = _canonicalize(js)
+        js_low = js.lower().strip()
+        
+        if js_canon in cand_canon or js_low in cand_raw:
+            matched_skills.append(js)
+            continue
+            
+        found = False
+        for cs in cand_raw:
+            if js_low in cs or cs in js_low:
+                found = True
+                break
+            cs_canon = _canonicalize(cs)
+            if js_canon in cs_canon or cs_canon in js_canon:
+                found = True
+                break
+        if found:
+            matched_skills.append(js)
+        else:
+            missing_skills.append(js)
+            
+    # 4. Fetch/calculate fit evaluation
+    run_row = database.fetchone(
+        """
+        SELECT o.final_score, o.explanation_text 
+        FROM ranking_run_outputs o
+        JOIN ranking_runs r ON o.ranking_run_id = r.id
+        JOIN candidate_snapshots s ON o.candidate_snapshot_id = s.id
+        WHERE r.job_version_id = %s AND s.candidate_id = %s
+        ORDER BY r.created_at DESC LIMIT 1
+        """,
+        [job_version_id, candidate_id]
+    )
+    
+    if run_row:
+        fit_score = float(run_row[0])
+        fit_explanation = run_row[1] or ""
+    else:
+        # Dynamically compute a fallback score
+        hard_skills_score = semantic_skill_match_score(cand_skills, job_skills_list)
+        soft_skills_score = compute_soft_skills_score(profile, parsed_json)
+        experience_score = compute_experience_score(profile, parsed_json)
+        domain_score = compute_domain_score(profile, parsed_json)
+        
+        fit_score = 0.4 * hard_skills_score + 0.3 * experience_score + 0.2 * domain_score + 0.1 * soft_skills_score
+        fit_explanation = "Rankings pipeline has not been run yet for this candidate. Run the AI Ranking Pipeline to generate a full explanation."
+        
+    # Classify fit level
+    if fit_score >= 75:
+        fit_level = "Good Fit"
+    elif fit_score >= 50:
+        fit_level = "Medium Fit"
+    elif fit_score >= 35:
+        fit_level = "Bad Fit"
+    else:
+        fit_level = "No Fit"
+        
+    try:
+        years_exp = int(profile.get("years_experience") or 0)
+    except:
+        years_exp = 0
+        
+    return CandidateJobProfileResponse(
+        candidate_id=candidate_id,
+        candidate_name=cand_name,
+        job_title=job_title,
+        status=cand_status,
+        years_experience=years_exp,
+        education_level=profile.get("education_level") or "Not Specified",
+        certifications=profile.get("certifications") or [],
+        career_trajectory=profile.get("career_trajectory") or "Not Specified",
+        domains=profile.get("domains") or [],
+        soft_skills=profile.get("soft_skills") or [],
+        skills=cand_skills,
+        matched_skills=matched_skills,
+        missing_skills=missing_skills,
+        fit_score=fit_score,
+        fit_level=fit_level,
+        fit_explanation=fit_explanation
+    )

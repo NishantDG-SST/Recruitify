@@ -57,33 +57,137 @@ class LLMClient:
         """Send a chat completion request and return the assistant text."""
         if not self._client:
             raise RuntimeError("LLM not configured (missing openai package or OPENAI_API_KEY)")
-        response = self._client.chat.completions.create(
-            model=self._config.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=self._config.temperature,
-            max_tokens=self._config.max_tokens,
-        )
-        return response.choices[0].message.content or ""
+        
+        import time
+        import random
+        
+        models = [self._config.model, "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+        seen = set()
+        model_rotation = [x for x in models if not (x in seen or seen.add(x))]
+        
+        last_exception = None
+        for attempt, model in enumerate(model_rotation):
+            try:
+                response = self._client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=self._config.temperature,
+                    max_tokens=self._config.max_tokens,
+                )
+                return response.choices[0].message.content or ""
+            except Exception as e:
+                last_exception = e
+                err_str = str(e).lower()
+                is_rate_limit = "429" in err_str or "rate limit" in err_str or "too many requests" in err_str
+                is_server_error = "503" in err_str or "overloaded" in err_str or "service unavailable" in err_str
+                
+                if (is_rate_limit or is_server_error) and attempt < len(model_rotation) - 1:
+                    logger.warning(f"LLM call failed with {model}. Rotating model to {model_rotation[attempt+1]}...")
+                    continue
+                else:
+                    break
+                    
+        if last_exception:
+            backoff = 2.0
+            for attempt in range(3):
+                try:
+                    response = self._client.chat.completions.create(
+                        model=model_rotation[-1],
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        temperature=self._config.temperature,
+                        max_tokens=self._config.max_tokens,
+                    )
+                    return response.choices[0].message.content or ""
+                except Exception as e:
+                    last_exception = e
+                    err_str = str(e).lower()
+                    is_rate_limit = "429" in err_str or "rate limit" in err_str or "too many requests" in err_str
+                    is_server_error = "503" in err_str or "overloaded" in err_str or "service unavailable" in err_str
+                    
+                    if (is_rate_limit or is_server_error) and attempt < 2:
+                        sleep_time = backoff * (2 ** attempt) + random.uniform(0.1, 0.5)
+                        logger.warning(f"Model rotation exhausted. Retrying with {model_rotation[-1]} in {sleep_time:.2f}s...")
+                        time.sleep(sleep_time)
+                    else:
+                        break
+                        
+        raise last_exception
 
     def complete_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
         """Send a chat completion request and parse the response as JSON."""
         if not self._client:
             raise RuntimeError("LLM not configured")
-        response = self._client.chat.completions.create(
-            model=self._config.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=self._config.temperature,
-            max_tokens=self._config.max_tokens,
-            response_format={"type": "json_object"},
-        )
-        raw = response.choices[0].message.content or "{}"
-        return json.loads(raw)
+            
+        import time
+        import random
+        
+        models = [self._config.model, "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+        seen = set()
+        model_rotation = [x for x in models if not (x in seen or seen.add(x))]
+        
+        last_exception = None
+        for attempt, model in enumerate(model_rotation):
+            try:
+                response = self._client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=self._config.temperature,
+                    max_tokens=self._config.max_tokens,
+                    response_format={"type": "json_object"},
+                )
+                raw = response.choices[0].message.content or "{}"
+                return json.loads(raw)
+            except Exception as e:
+                last_exception = e
+                err_str = str(e).lower()
+                is_rate_limit = "429" in err_str or "rate limit" in err_str or "too many requests" in err_str
+                is_server_error = "503" in err_str or "overloaded" in err_str or "service unavailable" in err_str
+                
+                if (is_rate_limit or is_server_error) and attempt < len(model_rotation) - 1:
+                    logger.warning(f"LLM JSON call failed with {model}. Rotating model to {model_rotation[attempt+1]}...")
+                    continue
+                else:
+                    break
+                    
+        if last_exception:
+            backoff = 2.0
+            for attempt in range(3):
+                try:
+                    response = self._client.chat.completions.create(
+                        model=model_rotation[-1],
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        temperature=self._config.temperature,
+                        max_tokens=self._config.max_tokens,
+                        response_format={"type": "json_object"},
+                    )
+                    raw = response.choices[0].message.content or "{}"
+                    return json.loads(raw)
+                except Exception as e:
+                    last_exception = e
+                    err_str = str(e).lower()
+                    is_rate_limit = "429" in err_str or "rate limit" in err_str or "too many requests" in err_str
+                    is_server_error = "503" in err_str or "overloaded" in err_str or "service unavailable" in err_str
+                    
+                    if (is_rate_limit or is_server_error) and attempt < 2:
+                        sleep_time = backoff * (2 ** attempt) + random.uniform(0.1, 0.5)
+                        logger.warning(f"Model rotation exhausted. Retrying with {model_rotation[-1]} in {sleep_time:.2f}s...")
+                        time.sleep(sleep_time)
+                    else:
+                        break
+                        
+        raise last_exception
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Generate embeddings for a batch of texts."""

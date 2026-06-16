@@ -52,6 +52,18 @@ export async function fetchRankings(jobId: string) {
   return response.json();
 }
 
+export async function generateRankings(jobId: string) {
+  const response = await fetch(`${API_BASE}/jobs/${jobId}/rankings`, {
+    method: "POST"
+  });
+
+  if (!response.ok) {
+    throw new Error("Failed to generate rankings");
+  }
+
+  return response.json();
+}
+
 export async function createOverride(jobId: string, runId: string, payload: { candidate_id: string; old_rank: number; new_rank: number; reason: string }) {
   const response = await fetch(`${API_BASE}/jobs/${jobId}/rankings/${runId}/overrides`, {
     method: "POST",
@@ -98,6 +110,14 @@ export async function fetchCandidateRounds(jobId: string, candidateId: string) {
   const response = await fetch(`${API_BASE}/jobs/${jobId}/candidates/${candidateId}/rounds`);
   if (!response.ok) {
     throw new Error("Failed to fetch candidate rounds");
+  }
+  return response.json();
+}
+
+export async function fetchCandidateJobProfile(jobId: string, candidateId: string) {
+  const response = await fetch(`${API_BASE}/jobs/${jobId}/candidates/${candidateId}/profile`);
+  if (!response.ok) {
+    throw new Error("Failed to fetch candidate job profile");
   }
   return response.json();
 }

@@ -8,9 +8,6 @@ from core.database import get_database
 from core.auth import SecurityContext, get_security_context
 from services.events.repository import EventRepository
 from services.jobs.repository import JobRepository
-from services.workers.event_factory import build_event
-from services.workers.factory import build_producer
-from services.workers.kafka_topics import JOB_CREATED
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -20,7 +17,6 @@ def create_job(payload: JobCreateRequest, security: SecurityContext = Depends(ge
     database = get_database(settings.database_dsn)
     job_repo = JobRepository(database)
     event_repo = EventRepository(database)
-    producer = build_producer(settings.broker_list())
 
     job = job_repo.create_job(
         org_id=security.org_id,
@@ -52,12 +48,6 @@ def create_job(payload: JobCreateRequest, security: SecurityContext = Depends(ge
         aggregate_id=job.job_id,
         payload={"job_id": job.job_id, "job_version_id": job.job_version_id},
     )
-    event = build_event(
-        event_type="JobCreated",
-        org_id=security.org_id,
-        payload={"job_id": job.job_id, "job_version_id": job.job_version_id, "created_by": security.user_id},
-    )
-    producer.publish(JOB_CREATED, event)
     return JobCreateResponse(job_id=job.job_id, status="active")
 
 

@@ -28,7 +28,7 @@ class CandidateRepository:
         if self._db.is_configured:
             self._db.execute(
                 "INSERT INTO candidates (id, org_id, status) VALUES (%s, %s, %s)",
-                [candidate_id, org_id, "active"],
+                [candidate_id, org_id, "processing"],
             )
             self._db.execute(
                 "INSERT INTO candidate_snapshots (id, candidate_id, snapshot_version, source, profile_json, resume_document_id) "

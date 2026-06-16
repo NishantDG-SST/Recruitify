@@ -1,24 +1,29 @@
 "use client";
 
-import { useSession } from "next-auth/react";
-
 export default function Header() {
-  const { data: session } = useSession();
-
   return (
     <header className="header-row">
       <input type="text" className="search-bar" placeholder="Search..." />
-      {session && (
-        <div className="user-profile">
-          <img 
-            src={session.user?.image || ""} 
-            alt="User avatar" 
-            className="user-avatar" 
-            style={{ objectFit: 'cover' }}
-          />
-          Welcome back, {session.user?.name?.split(' ')[0]?.toUpperCase() || "USER"}
+      <div className="user-profile">
+        <div 
+          className="user-avatar" 
+          style={{ 
+            width: '32px', 
+            height: '32px', 
+            borderRadius: '50%', 
+            background: 'var(--accent)', 
+            display: 'flex', 
+            alignItems: 'center', 
+            justifyContent: 'center', 
+            fontWeight: 'bold', 
+            color: '#fff', 
+            fontSize: '12px' 
+          }}
+        >
+          DU
         </div>
-      )}
+        Welcome back, DEMO USER
+      </div>
     </header>
   );
 }
