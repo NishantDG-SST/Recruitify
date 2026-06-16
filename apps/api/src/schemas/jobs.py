@@ -11,3 +11,11 @@ class JobCreateRequest(BaseModel):
 class JobCreateResponse(BaseModel):
     job_id: str
     status: str
+
+
+class JobDetailResponse(BaseModel):
+    id: str
+    title: str
+    raw_text: str
+    parsed_json: Optional[dict] = None
+    created_at: str

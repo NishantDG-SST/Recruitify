@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, status
 
-from schemas.jobs import JobCreateRequest, JobCreateResponse
+from schemas.jobs import JobCreateRequest, JobCreateResponse, JobDetailResponse
 from pydantic import BaseModel
 from typing import List, Any
 from core.config import settings
@@ -120,3 +120,41 @@ def delete_job(job_id: str, security: SecurityContext = Depends(get_security_con
     database.execute("DELETE FROM jobs WHERE id = %s AND org_id = %s", [job_id, security.org_id])
 
     return {"status": "deleted", "job_id": job_id}
+
+
+@router.get("/{job_id}", response_model=JobDetailResponse)
+def get_job_detail(job_id: str, security: SecurityContext = Depends(get_security_context)) -> JobDetailResponse:
+    from fastapi import HTTPException
+    import json
+    
+    database = get_database(settings.database_dsn)
+    
+    # Fetch job details and latest version (scoped to org_id)
+    row = database.fetchone(
+        """
+        SELECT j.id, jv.title, jv.raw_text, jv.parsed_json, j.created_at
+        FROM jobs j
+        JOIN job_versions jv ON jv.job_id = j.id
+        WHERE j.id = %s AND j.org_id = %s
+        ORDER BY jv.version DESC LIMIT 1
+        """,
+        [job_id, security.org_id]
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Job not found")
+        
+    jid, title, raw_text, parsed_json, created_at = row
+    
+    if isinstance(parsed_json, str):
+        try:
+            parsed_json = json.loads(parsed_json)
+        except json.JSONDecodeError:
+            parsed_json = {}
+            
+    return JobDetailResponse(
+        id=str(jid),
+        title=title or "Untitled",
+        raw_text=raw_text or "",
+        parsed_json=parsed_json,
+        created_at=created_at.isoformat() if created_at else ""
+    )

@@ -20,6 +20,12 @@ export async function fetchJobs() {
   return response.json();
 }
 
+export async function fetchJobDetail(jobId: string) {
+  const response = await fetch(`${API_BASE}/jobs/${jobId}`);
+  if (!response.ok) throw new Error("Failed to fetch job detail");
+  return response.json();
+}
+
 export async function fetchCandidates(jobId: string) {
   const response = await fetch(`${API_BASE}/jobs/${jobId}/candidates`);
   if (!response.ok) throw new Error("Failed to fetch candidates");

@@ -319,82 +319,217 @@ export default function RankingsPage({ params }: { params: { jobId: string } }) 
                 </div>
                 {status ? <div style={{ marginBottom: 12, fontWeight: 700, color: '#b4462f' }}>{status}</div> : null}
                 <div className="ranking-list">
-                  {candidates.map((candidate) => (
-                    <div className="ranking-item" key={candidate.candidate_id}>
-                      <div className="ranking-avatar"></div>
-                      <div className="ranking-info">
-                        <div className="ranking-name">{candidate.candidate_name || candidate.candidate_id} <span className="tag" style={{ marginLeft: 8 }}>Rank #{candidate.rank}</span></div>
-                        <div style={{ fontSize: '13px', fontWeight: 700, marginBottom: 4, color: '#b4462f' }}>
-                          Score: {candidate.score.toFixed(1)}
+                  {candidates.map((candidate, index) => {
+                    const getRankStyles = (idx: number) => {
+                      if (idx === 0) {
+                        return {
+                          cardClass: "rank-card-0",
+                          avatarBg: "linear-gradient(135deg, #38120b, #612216)",
+                          buttonBg: "#38120b",
+                          buttonHoverBg: "#ff7d29",
+                          buttonColor: "#ffffff"
+                        };
+                      } else if (idx === 1) {
+                        return {
+                          cardClass: "rank-card-1",
+                          avatarBg: "linear-gradient(135deg, #ff7d29, #ff9b44)",
+                          buttonBg: "#ff9b44",
+                          buttonHoverBg: "#38120b",
+                          buttonColor: "#ffffff"
+                        };
+                      } else if (idx === 2) {
+                        return {
+                          cardClass: "rank-card-2",
+                          avatarBg: "linear-gradient(135deg, #ff9b44, #ffb87a)",
+                          buttonBg: "#ff7d29",
+                          buttonHoverBg: "#ff9b44",
+                          buttonColor: "#ffffff"
+                        };
+                      } else {
+                        const isEven = idx % 2 === 0;
+                        return {
+                          cardClass: isEven ? "rank-card-other-even" : "rank-card-other-odd",
+                          avatarBg: "linear-gradient(135deg, #ff9b44, #ff7d29)",
+                          buttonBg: "#ff7d29",
+                          buttonHoverBg: "#38120b",
+                          buttonColor: "#ffffff"
+                        };
+                      }
+                    };
+                    const styles = getRankStyles(index);
+                    const initials = candidate.candidate_name 
+                      ? candidate.candidate_name.split(' ').map((n: string) => n[0]).join('').toUpperCase().slice(0, 2) 
+                      : '?';
+
+                    return (
+                      <div 
+                        className={`ranking-item ${styles.cardClass}`} 
+                        key={candidate.candidate_id} 
+                        style={{ 
+                          display: 'flex', 
+                          alignItems: 'center', 
+                          padding: '16px 24px', 
+                          borderRadius: '20px', 
+                          boxShadow: '0 4px 14px rgba(0,0,0,0.02)', 
+                          marginBottom: '12px',
+                          transition: 'all 0.2s ease',
+                          gap: '20px'
+                        }}
+                      >
+                        {/* Avatar Column */}
+                        <div className="ranking-avatar" style={{ 
+                          display: 'flex', 
+                          alignItems: 'center', 
+                          justifyContent: 'center', 
+                          fontWeight: 900, 
+                          color: '#fff', 
+                          fontSize: '18px', 
+                          background: styles.avatarBg,
+                          width: '56px',
+                          height: '56px',
+                          borderRadius: '50%',
+                          flexShrink: 0,
+                          boxShadow: '0 4px 8px rgba(0,0,0,0.08)',
+                          border: '2px solid #ffffff'
+                        }}>
+                          {initials}
                         </div>
-                        {candidate.explanation_text && (
-                          <div className="ranking-desc" style={{ marginBottom: 12 }}>
-                            {candidate.explanation_text}
-                          </div>
-                        )}
                         
-                        {/* Score Breakdown Progress Bars */}
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', maxWidth: '450px', marginTop: '12px', background: 'rgba(255,255,255,0.4)', padding: '10px', borderRadius: '6px', border: '1px solid rgba(0,0,0,0.03)' }}>
-                          {[
-                            { label: "Hard Skills", value: candidate.category_scores?.hard_skills },
-                            { label: "Soft Skills", value: candidate.category_scores?.soft_skills },
-                            { label: "Experience", value: candidate.category_scores?.experience },
-                            { label: "Domain Knowledge", value: candidate.category_scores?.domain_knowledge },
-                          ].map((bar, idx) => (
-                            <div key={idx} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)' }}>
-                                <span>{bar.label}</span>
-                                <span>{typeof bar.value === 'number' ? `${bar.value.toFixed(0)}%` : '0%'}</span>
-                              </div>
-                              <div style={{ width: '100%', height: '6px', background: 'rgba(0,0,0,0.06)', borderRadius: '3px', overflow: 'hidden' }}>
-                                <div style={{ 
-                                  width: `${bar.value || 0}%`, 
-                                  height: '100%', 
-                                  background: bar.label === 'Hard Skills' ? '#4361ee' : 
-                                              bar.label === 'Soft Skills' ? '#4cc9f0' : 
-                                              bar.label === 'Experience' ? '#f72585' : '#7209b7',
-                                  borderRadius: '3px',
-                                  transition: 'width 0.3s ease'
-                                }} />
-                              </div>
+                        {/* Candidate Info Column */}
+                        <div className="ranking-info" style={{ flex: 1.2, display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                            <span 
+                              onClick={() => handleOpenProfile(candidate.candidate_id)}
+                              style={{ 
+                                fontWeight: 800, 
+                                fontSize: '18px', 
+                                color: '#38120b', 
+                                cursor: 'pointer',
+                                transition: 'color 0.2s'
+                              }}
+                              onMouseOver={(e) => e.currentTarget.style.color = '#ff7d29'}
+                              onMouseOut={(e) => e.currentTarget.style.color = '#38120b'}
+                            >
+                              {candidate.candidate_name || "Unknown Candidate"}
+                            </span>
+                          </div>
+                          
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                            <span style={{ fontSize: '11px', background: '#38120b', color: '#fff', padding: '2px 8px', borderRadius: '12px', fontWeight: 800 }}>
+                              Rank #{candidate.rank}
+                            </span>
+                            <span style={{
+                              fontSize: '11px',
+                              background: candidate.score >= 75 ? '#d8f3dc' : candidate.score >= 50 ? '#fff3cd' : '#ffebee',
+                              color: candidate.score >= 75 ? '#1b4332' : candidate.score >= 50 ? '#856404' : '#721c24',
+                              padding: '2px 8px',
+                              borderRadius: '12px',
+                              fontWeight: 800
+                            }}>
+                              {candidate.score.toFixed(0)}% Match
+                            </span>
+                          </div>
+
+                          {candidate.explanation_text && (
+                            <div className="ranking-desc" style={{ 
+                              fontSize: '12.5px', 
+                              color: '#555', 
+                              lineHeight: '1.4', 
+                              fontStyle: 'italic',
+                              marginTop: '2px',
+                              display: '-webkit-box',
+                              WebkitLineClamp: 2,
+                              WebkitBoxOrient: 'vertical',
+                              overflow: 'hidden'
+                            }}>
+                              "{candidate.explanation_text}"
                             </div>
-                          ))}
+                          )}
+                        </div>
+                        
+                        {/* Score Breakdown Progress Bars Column */}
+                        <div style={{ flex: 1, display: 'flex', justifyContent: 'center' }}>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 12px', width: '100%', maxWidth: '300px', background: 'rgba(255,255,255,0.4)', padding: '10px 12px', borderRadius: '12px', border: '1px solid rgba(0,0,0,0.04)' }}>
+                            {[
+                              { label: "Hard Skills", value: candidate.category_scores?.hard_skills, color: "#b4462f" },
+                              { label: "Soft Skills", value: candidate.category_scores?.soft_skills, color: "#ff7d29" },
+                              { label: "Experience", value: candidate.category_scores?.experience, color: "#9d4edd" },
+                              { label: "Domain Knowledge", value: candidate.category_scores?.domain_knowledge, color: "#2d6a4f" },
+                            ].map((bar, idx) => (
+                              <div key={idx} style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '9px', fontWeight: 800, color: '#755f58' }}>
+                                  <span style={{ whiteSpace: 'nowrap' }}>{bar.label}</span>
+                                  <span>{typeof bar.value === 'number' ? `${bar.value.toFixed(0)}%` : '0%'}</span>
+                                </div>
+                                <div style={{ width: '100%', height: '3px', background: 'rgba(0,0,0,0.05)', borderRadius: '1.5px', overflow: 'hidden' }}>
+                                  <div style={{ 
+                                    width: `${bar.value || 0}%`, 
+                                    height: '100%', 
+                                    background: bar.color,
+                                    borderRadius: '1.5px',
+                                    transition: 'width 0.3s ease'
+                                  }} />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Actions Column */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '130px', alignItems: 'stretch', justifyContent: 'center', flexShrink: 0 }}>
+                          <button 
+                            className="pill-button" 
+                            onClick={() => handleMoveToInterview(candidate.candidate_id)}
+                            disabled={movedCandidates[candidate.candidate_id]}
+                            style={{ 
+                              background: movedCandidates[candidate.candidate_id] ? '#2d6a4f' : styles.buttonBg, 
+                              color: '#ffffff',
+                              padding: '10px 16px',
+                              fontSize: '12px',
+                              fontWeight: 800,
+                              border: 'none',
+                              borderRadius: '30px',
+                              cursor: movedCandidates[candidate.candidate_id] ? 'default' : 'pointer',
+                              boxShadow: movedCandidates[candidate.candidate_id] ? 'none' : '0 4px 10px rgba(0,0,0,0.05)',
+                              transition: 'all 0.2s ease',
+                              width: '100%',
+                              textAlign: 'center'
+                            }}
+                          >
+                            {movedCandidates[candidate.candidate_id] ? "✓ Interviewing" : "Interview"}
+                          </button>
+                          
+                          <div style={{ display: 'flex', gap: '8px', justifyContent: 'center', alignItems: 'center' }}>
+                            <span 
+                              onClick={() => handleOpenProfile(candidate.candidate_id)}
+                              style={{ 
+                                fontSize: '11px', 
+                                fontWeight: 700, 
+                                color: '#38120b', 
+                                cursor: 'pointer', 
+                                textDecoration: 'underline' 
+                              }}
+                            >
+                              Profile
+                            </span>
+                            <span style={{ color: 'rgba(56, 18, 11, 0.2)', fontSize: '10px' }}>|</span>
+                            <span 
+                              onClick={() => handleOverride(candidate.candidate_id, candidate.rank)}
+                              style={{ 
+                                fontSize: '11px', 
+                                fontWeight: 700, 
+                                color: '#38120b', 
+                                cursor: 'pointer', 
+                                textDecoration: 'underline' 
+                              }}
+                            >
+                              Override
+                            </span>
+                          </div>
                         </div>
                       </div>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                        <button 
-                          className="pill-button" 
-                          onClick={() => handleOpenProfile(candidate.candidate_id)}
-                          disabled={profileLoading}
-                          style={{ 
-                            background: 'rgba(180, 70, 47, 0.05)', 
-                            color: '#b4462f',
-                            borderColor: 'rgba(180, 70, 47, 0.2)'
-                          }}
-                        >
-                          {profileLoading ? "Loading..." : "View Profile"}
-                        </button>
-                        <button 
-                          className="pill-button" 
-                          onClick={() => handleMoveToInterview(candidate.candidate_id)}
-                          disabled={movedCandidates[candidate.candidate_id]}
-                          style={{ 
-                            background: movedCandidates[candidate.candidate_id] ? '#e2e8f0' : '#fff', 
-                            color: movedCandidates[candidate.candidate_id] ? '#64748b' : 'var(--brand-blue)',
-                            cursor: movedCandidates[candidate.candidate_id] ? 'not-allowed' : 'pointer'
-                          }}
-                        >
-                          {movedCandidates[candidate.candidate_id] ? "✓ In Interview" : "Move to Interview"}
-                        </button>
-                        <button 
-                          className="pill-button" 
-                          onClick={() => handleOverride(candidate.candidate_id, candidate.rank)}
-                        >
-                          Override
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             </div>
@@ -774,6 +909,51 @@ export default function RankingsPage({ params }: { params: { jobId: string } }) 
             @keyframes scaleUp {
               from { transform: scale(0.95); opacity: 0; }
               to { transform: scale(1); opacity: 1; }
+            }
+            .rank-card-0 {
+              background: #fffdfa !important;
+              border: 1px solid rgba(56, 18, 11, 0.1) !important;
+            }
+            .rank-card-0:hover {
+              background: #fffcf8 !important;
+              transform: translateY(-2px);
+              box-shadow: 0 8px 20px rgba(56, 18, 11, 0.08) !important;
+            }
+            .rank-card-1 {
+              background: #ffeed6 !important;
+              border: 1px solid rgba(255, 125, 41, 0.15) !important;
+            }
+            .rank-card-1:hover {
+              background: #ffe8c4 !important;
+              transform: translateY(-2px);
+              box-shadow: 0 8px 20px rgba(255, 125, 41, 0.08) !important;
+            }
+            .rank-card-2 {
+              background: #ffe2bf !important;
+              border: 1px solid rgba(255, 155, 68, 0.15) !important;
+            }
+            .rank-card-2:hover {
+              background: #ffdca8 !important;
+              transform: translateY(-2px);
+              box-shadow: 0 8px 20px rgba(255, 155, 68, 0.08) !important;
+            }
+            .rank-card-other-even {
+              background: #ffeed6 !important;
+              border: 1px solid rgba(255, 155, 68, 0.1) !important;
+            }
+            .rank-card-other-even:hover {
+              background: #ffe8c4 !important;
+              transform: translateY(-2px);
+              box-shadow: 0 8px 20px rgba(255, 155, 68, 0.08) !important;
+            }
+            .rank-card-other-odd {
+              background: #ffe2bf !important;
+              border: 1px solid rgba(255, 155, 68, 0.1) !important;
+            }
+            .rank-card-other-odd:hover {
+              background: #ffdca8 !important;
+              transform: translateY(-2px);
+              box-shadow: 0 8px 20px rgba(255, 155, 68, 0.08) !important;
             }
           `}</style>
         </div>
