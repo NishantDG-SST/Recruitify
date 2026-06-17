@@ -27,6 +27,7 @@ from api.routes.rankings import (
     compute_domain_score,
     compute_experience_score,
     _canonicalize,
+    check_candidate_has_requirement,
 )
 
 router = APIRouter(prefix="/jobs/{job_id}/candidates", tags=["candidates"])
@@ -236,7 +237,7 @@ def get_candidate_detail(
                     job_requirements = {}
 
     job_skills_list = (job_requirements.get("must_have_skills") or []) + (job_requirements.get("nice_to_have_skills") or [])
-    hard_skills_score = semantic_skill_match_score(profile.get("skills", []), job_skills_list)
+    hard_skills_score = semantic_skill_match_score(profile.get("skills", []), job_skills_list, profile.get("domains", []))
     soft_skills_score = compute_soft_skills_score(profile, job_requirements)
 
     experience_score = compute_experience_score(profile, job_requirements)
@@ -440,30 +441,12 @@ def get_candidate_job_profile(
     job_skills_list = must_have + nice_to_have
     
     cand_skills = profile.get("skills") or []
-    cand_canon = {_canonicalize(s) for s in cand_skills}
-    cand_raw = {s.lower().strip() for s in cand_skills}
     
     matched_skills = []
     missing_skills = []
     
     for js in job_skills_list:
-        js_canon = _canonicalize(js)
-        js_low = js.lower().strip()
-        
-        if js_canon in cand_canon or js_low in cand_raw:
-            matched_skills.append(js)
-            continue
-            
-        found = False
-        for cs in cand_raw:
-            if js_low in cs or cs in js_low:
-                found = True
-                break
-            cs_canon = _canonicalize(cs)
-            if js_canon in cs_canon or cs_canon in js_canon:
-                found = True
-                break
-        if found:
+        if check_candidate_has_requirement(js, cand_skills, profile.get("domains") or [], profile.get("raw_text") or ""):
             matched_skills.append(js)
         else:
             missing_skills.append(js)
@@ -486,12 +469,19 @@ def get_candidate_job_profile(
         fit_explanation = run_row[1] or ""
     else:
         # Dynamically compute a fallback score
-        hard_skills_score = semantic_skill_match_score(cand_skills, job_skills_list)
+        hard_skills_score = semantic_skill_match_score(cand_skills, job_skills_list, profile.get("domains", []))
         soft_skills_score = compute_soft_skills_score(profile, parsed_json)
         experience_score = compute_experience_score(profile, parsed_json)
         domain_score = compute_domain_score(profile, parsed_json)
         
-        fit_score = 0.4 * hard_skills_score + 0.3 * experience_score + 0.2 * domain_score + 0.1 * soft_skills_score
+        if hard_skills_score < 15.0:
+            experience_score_gated = 0.0
+            domain_score_gated = 0.0
+        else:
+            experience_score_gated = experience_score
+            domain_score_gated = domain_score
+
+        fit_score = 0.4 * hard_skills_score + 0.15 * experience_score_gated + 0.1 * domain_score_gated + 0.35 * soft_skills_score
         fit_explanation = "Rankings pipeline has not been run yet for this candidate. Run the AI Ranking Pipeline to generate a full explanation."
         
     # Classify fit level

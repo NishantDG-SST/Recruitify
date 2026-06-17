@@ -73,41 +73,70 @@ def _canonicalize(skill: str) -> str:
     return _SKILL_CANON.get(s, s)
 
 
-def semantic_skill_match_score(cand_skills: list[str], job_skills: list[str]) -> float:
+def check_candidate_has_requirement(req: str, cand_skills: list[str], cand_domains: list[str], cand_raw_text: str = "") -> bool:
+    req_clean = req.lower().strip()
+    
+    cand_skills_clean = [s.lower().strip() for s in cand_skills]
+    cand_skills_canon = {_canonicalize(s) for s in cand_skills_clean}
+    req_canon = _canonicalize(req_clean)
+    
+    if req_canon in cand_skills_canon or req_clean in cand_skills_clean:
+        return True
+        
+    for cs in cand_skills_clean:
+        if req_clean in cs or cs in req_clean:
+            return True
+        cs_canon = _canonicalize(cs)
+        if req_canon in cs_canon or cs_canon in req_canon:
+            return True
+            
+    cand_domains_clean = [d.lower().strip() for d in cand_domains]
+    domain_synonyms = {
+        "life sciences": {"life sciences", "life science", "biology", "biotech", "biotechnology", "pharmaceuticals", "pharma"},
+        "pharmaceutical industries": {"pharmaceuticals", "pharmaceutical", "pharma", "pharmaceutical industry", "pharmaceutical industries", "drug development", "life sciences"},
+        "pharmaceuticals": {"pharmaceuticals", "pharmaceutical", "pharma", "pharmaceutical industry", "pharmaceutical industries", "drug development", "life sciences"},
+        "contract research organization (cro)": {"contract research organization", "cro", "clinical trials", "clinical trial", "clinical research"},
+        "cro": {"contract research organization", "cro", "clinical trials", "clinical trial", "clinical research"},
+    }
+    
+    syns = domain_synonyms.get(req_clean, {req_clean})
+    for d in cand_domains_clean:
+        if d in syns:
+            return True
+        for syn in syns:
+            if syn in d or d in syn:
+                return True
+                
+    for d in cand_domains_clean:
+        if req_clean in d or d in req_clean:
+            return True
+
+    if cand_raw_text:
+        raw_lower = cand_raw_text.lower()
+        if req_clean in raw_lower:
+            return True
+        for syn in syns:
+            if syn in raw_lower:
+                return True
+                
+    return False
+
+
+def semantic_skill_match_score(cand_skills: list[str], job_skills: list[str], cand_domains: list[str] = None) -> float:
     """Compute semantic skill match percentage (0-100).
     
-    Uses synonym mapping + substring matching as fallback.
+    Uses synonym mapping + substring matching as fallback + checks domains.
     """
     if not job_skills:
         return 100.0
     
-    cand_canon = {_canonicalize(s) for s in cand_skills}
-    cand_raw = {s.lower().strip() for s in cand_skills}
+    cand_domains = cand_domains or []
     matched = 0
     
     for js in job_skills:
-        js_canon = _canonicalize(js)
-        js_low = js.lower().strip()
-        
-        # Exact canonical match
-        if js_canon in cand_canon:
+        if check_candidate_has_requirement(js, cand_skills, cand_domains):
             matched += 1
-            continue
-        
-        # Check if any candidate skill contains the job skill or vice versa
-        found = False
-        for cs in cand_raw:
-            if js_low in cs or cs in js_low:
-                found = True
-                break
-            # Also check canonical forms
-            cs_canon = _canonicalize(cs)
-            if js_canon in cs_canon or cs_canon in js_canon:
-                found = True
-                break
-        if found:
-            matched += 1
-    
+            
     return (matched / len(job_skills)) * 100.0
 
 
@@ -162,7 +191,9 @@ def compute_domain_score(cand_profile: dict, job_parsed: dict) -> float:
     
     domain_keywords: dict[str, list[str]] = {
         "fintech": ["fintech", "financial", "banking", "payments", "trading", "finance", "investment"],
-        "healthcare": ["healthcare", "medical", "health", "clinical", "hospital", "patient"],
+        "healthcare": ["healthcare", "medical", "health", "clinical", "hospital", "patient", "life sciences", "pharmaceuticals", "pharma", "cro", "clinical trial"],
+        "medical services": ["medical services", "medical", "healthcare", "clinical", "hospital", "patient", "life sciences", "pharmaceuticals", "pharma", "cro", "clinical trial"],
+        "hospital": ["hospital", "medical", "healthcare", "clinical", "patient"],
         "e-commerce": ["ecommerce", "e-commerce", "retail", "marketplace", "shopping", "commerce"],
         "saas": ["saas", "software as a service", "platform", "b2b", "subscription"],
         "edtech": ["edtech", "education", "learning", "academic"],
@@ -339,7 +370,7 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
                     cand_name = profile_json.get("name", "Unknown Candidate")
                     
                     # Compute category scores
-                    hard_skills_score = semantic_skill_match_score(profile_json.get("skills", []), job_skills_list)
+                    hard_skills_score = semantic_skill_match_score(profile_json.get("skills", []), job_skills_list, profile_json.get("domains", []))
                     soft_skills_score = compute_soft_skills_score(profile_json, parsed_json)
                     experience_score = compute_experience_score(profile_json, parsed_json)
                     domain_score = compute_domain_score(profile_json, parsed_json)
@@ -480,7 +511,7 @@ def generate_rankings(job_id: str, security: SecurityContext = Depends(get_secur
         
         # Include individual must-haves in features
         for mh in must_have_skills:
-            cand_score_features[mh] = 1.0 if mh in cand_skills else 0.0
+            cand_score_features[mh] = 1.0 if check_candidate_has_requirement(mh, profile.get("skills", []), profile.get("domains", []), profile.get("raw_text", "")) else 0.0
             job_score_features[mh] = 1.0
         
         # Fetch candidate embedding from DB
@@ -497,7 +528,7 @@ def generate_rankings(job_id: str, security: SecurityContext = Depends(get_secur
             logger.info("Loaded real embedding for candidate snapshot %s", snap_id)
 
         # Calculate consistent category scores
-        hard_skills_score = semantic_skill_match_score(profile.get("skills", []), job_skills_list)
+        hard_skills_score = semantic_skill_match_score(profile.get("skills", []), job_skills_list, profile.get("domains", []))
         soft_skills_score = compute_soft_skills_score(profile, parsed_json)
         experience_score = compute_experience_score(profile, parsed_json)
         domain_score = compute_domain_score(profile, parsed_json)
@@ -518,14 +549,21 @@ def generate_rankings(job_id: str, security: SecurityContext = Depends(get_secur
         # Overwrite scores to use the correct category values for final scoring
         semantic_sim = match_result.scores.get("semantic_similarity", 0.0)
         match_result.scores["skills"] = hard_skills_score / 100.0
-        match_result.scores["experience"] = experience_score / 100.0
-        match_result.scores["education"] = domain_score / 100.0
+        
+        # Apply Gating logic
+        if match_result.scores["skills"] < 0.15:
+            match_result.scores["experience"] = 0.0
+            match_result.scores["education"] = 0.0
+        else:
+            match_result.scores["experience"] = experience_score / 100.0
+            match_result.scores["education"] = domain_score / 100.0
+
         match_result.scores["semantic_similarity"] = 0.7 * (soft_skills_score / 100.0) + 0.3 * semantic_sim
 
         score_result = scorer.score(
             ScoreInput(
                 match_scores=match_result.scores,
-                weights={"skills": 0.4, "experience": 0.3, "education": 0.2, "semantic_similarity": 0.1},
+                weights={"skills": 0.4, "experience": 0.15, "education": 0.1, "semantic_similarity": 0.35},
                 must_have=must_have_skills,
                 evidence={key: [ScoreEvidence(source="match", text="")] for key in match_result.scores}
             )
@@ -720,7 +758,7 @@ def simulate_ranking(
                     profile_json = {}
 
             job_skills_list = (parsed_json.get("must_have_skills") or []) + (parsed_json.get("nice_to_have_skills") or [])
-            hard_skills_score = semantic_skill_match_score(profile_json.get("skills", []), job_skills_list)
+            hard_skills_score = semantic_skill_match_score(profile_json.get("skills", []), job_skills_list, profile_json.get("domains", []))
             soft_skills_score = compute_soft_skills_score(profile_json, parsed_json)
             experience_score = compute_experience_score(profile_json, parsed_json)
             domain_score = compute_domain_score(profile_json, parsed_json)
@@ -748,8 +786,15 @@ def simulate_ranking(
             # Overwrite scores to use the correct category values for final scoring
             semantic_sim = match_result.scores.get("semantic_similarity", 0.0)
             match_result.scores["skills"] = hard_skills_score / 100.0
-            match_result.scores["experience"] = experience_score / 100.0
-            match_result.scores["education"] = domain_score / 100.0
+            
+            # Apply Gating logic
+            if match_result.scores["skills"] < 0.15:
+                match_result.scores["experience"] = 0.0
+                match_result.scores["education"] = 0.0
+            else:
+                match_result.scores["experience"] = experience_score / 100.0
+                match_result.scores["education"] = domain_score / 100.0
+
             match_result.scores["semantic_similarity"] = 0.7 * (soft_skills_score / 100.0) + 0.3 * semantic_sim
 
             score_result = scorer.score(
@@ -914,7 +959,7 @@ def simulate_ranking(
             }
             
             for mh in must_have_skills:
-                cand_score_features[mh] = 1.0 if mh in cand_skills else 0.0
+                cand_score_features[mh] = 1.0 if check_candidate_has_requirement(mh, profile_json.get("skills", []), profile_json.get("domains", []), profile_json.get("raw_text", "")) else 0.0
                 job_score_features[mh] = 1.0
             
             cand_embedding_vector = [0.0] * 768
@@ -929,7 +974,7 @@ def simulate_ranking(
                 cand_embedding_vector = val
 
             job_skills_list = (parsed_json.get("must_have_skills") or []) + (parsed_json.get("nice_to_have_skills") or [])
-            hard_skills_score = semantic_skill_match_score(profile_json.get("skills", []), job_skills_list)
+            hard_skills_score = semantic_skill_match_score(profile_json.get("skills", []), job_skills_list, profile_json.get("domains", []))
             soft_skills_score = compute_soft_skills_score(profile_json, parsed_json)
             experience_score = compute_experience_score(profile_json, parsed_json)
             domain_score = compute_domain_score(profile_json, parsed_json)
@@ -957,8 +1002,15 @@ def simulate_ranking(
             # Overwrite scores to use the correct category values for final scoring
             semantic_sim = match_result.scores.get("semantic_similarity", 0.0)
             match_result.scores["skills"] = hard_skills_score / 100.0
-            match_result.scores["experience"] = experience_score / 100.0
-            match_result.scores["education"] = domain_score / 100.0
+            
+            # Apply Gating logic
+            if match_result.scores["skills"] < 0.15:
+                match_result.scores["experience"] = 0.0
+                match_result.scores["education"] = 0.0
+            else:
+                match_result.scores["experience"] = experience_score / 100.0
+                match_result.scores["education"] = domain_score / 100.0
+
             match_result.scores["semantic_similarity"] = 0.7 * (soft_skills_score / 100.0) + 0.3 * semantic_sim
 
             score_result = scorer.score(

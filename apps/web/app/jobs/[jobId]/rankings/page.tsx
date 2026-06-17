@@ -25,9 +25,9 @@ export default function RankingsPage({ params }: { params: { jobId: string } }) 
   const [profileLoading, setProfileLoading] = useState<boolean>(false);
   
   const [skillsWeight, setSkillsWeight] = useState(0.4);
-  const [expWeight, setExpWeight] = useState(0.3);
-  const [eduWeight, setEduWeight] = useState(0.2);
-  const [semWeight, setSemWeight] = useState(0.1);
+  const [expWeight, setExpWeight] = useState(0.15);
+  const [eduWeight, setEduWeight] = useState(0.1);
+  const [semWeight, setSemWeight] = useState(0.35);
 
   const handleRecalculate = async () => {
     try {
@@ -106,9 +106,9 @@ export default function RankingsPage({ params }: { params: { jobId: string } }) 
 
           if (s !== null || ex !== null || ed !== null || sem !== null) {
             const wSkills = s !== null ? parseFloat(s) : 0.4;
-            const wExp = ex !== null ? parseFloat(ex) : 0.3;
-            const wEdu = ed !== null ? parseFloat(ed) : 0.2;
-            const wSem = sem !== null ? parseFloat(sem) : 0.1;
+            const wExp = ex !== null ? parseFloat(ex) : 0.15;
+            const wEdu = ed !== null ? parseFloat(ed) : 0.1;
+            const wSem = sem !== null ? parseFloat(sem) : 0.35;
 
             setSkillsWeight(wSkills);
             setExpWeight(wExp);
