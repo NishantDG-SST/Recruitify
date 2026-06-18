@@ -20,7 +20,12 @@ const authOptions = {
         try {
           const res = await fetch(`${API_URL}/users/login`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              // /api/auth/* is NOT proxied by middleware, so this server-side call
+              // must carry the internal token itself or the backend guard 403s it.
+              "x-internal-token": process.env.INTERNAL_API_TOKEN || "",
+            },
             body: JSON.stringify({ email, password }),
           });
           if (!res.ok) return null;
