@@ -132,7 +132,7 @@ def get_job_detail(job_id: str, security: SecurityContext = Depends(get_security
     # Fetch job details and latest version (scoped to org_id)
     row = database.fetchone(
         """
-        SELECT j.id, jv.title, jv.raw_text, jv.parsed_json, j.created_at
+        SELECT j.id, jv.title, jv.raw_text, jv.parsed_json, j.created_at, jv.id
         FROM jobs j
         JOIN job_versions jv ON jv.job_id = j.id
         WHERE j.id = %s AND j.org_id = %s
@@ -142,19 +142,40 @@ def get_job_detail(job_id: str, security: SecurityContext = Depends(get_security
     )
     if not row:
         raise HTTPException(status_code=404, detail="Job not found")
-        
-    jid, title, raw_text, parsed_json, created_at = row
-    
+
+    jid, title, raw_text, parsed_json, created_at, version_id = row
+
     if isinstance(parsed_json, str):
         try:
             parsed_json = json.loads(parsed_json)
         except json.JSONDecodeError:
             parsed_json = {}
-            
+    parsed_json = parsed_json or {}
+
+    # Generate an LLM summary of the job once and cache it inside parsed_json.
+    summary = parsed_json.get("summary") or ""
+    if not summary:
+        from services.summaries.generator import SummaryService
+        from services.llm.client import LLMClient, LLMConfig
+        llm = LLMClient(LLMConfig(
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
+            model=settings.llm_model,
+        ))
+        summary, used_llm = SummaryService(llm).summarize_job(parsed_json, raw_text or "")
+        parsed_json["summary"] = summary
+        # Only persist real LLM output; fallbacks are shown but not cached so they self-heal.
+        if used_llm:
+            database.execute(
+                "UPDATE job_versions SET parsed_json = %s WHERE id = %s",
+                [json.dumps(parsed_json), str(version_id)],
+            )
+
     return JobDetailResponse(
         id=str(jid),
         title=title or "Untitled",
         raw_text=raw_text or "",
         parsed_json=parsed_json,
-        created_at=created_at.isoformat() if created_at else ""
+        created_at=created_at.isoformat() if created_at else "",
+        summary=summary,
     )

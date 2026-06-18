@@ -19,3 +19,4 @@ class JobDetailResponse(BaseModel):
     raw_text: str
     parsed_json: Optional[dict] = None
     created_at: str
+    summary: str = ""

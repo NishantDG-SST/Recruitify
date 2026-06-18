@@ -1,41 +1,41 @@
 import NextAuth from "next-auth";
-import GoogleProvider from "next-auth/providers/google";
+import CredentialsProvider from "next-auth/providers/credentials";
+
+const API_URL = process.env.INTERNAL_API_URL || "http://127.0.0.1:8000";
 
 const authOptions = {
   providers: [
-    GoogleProvider({
-      clientId: process.env.GOOGLE_CLIENT_ID || "",
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
+    CredentialsProvider({
+      name: "Email and Password",
+      credentials: {
+        email: { label: "Email", type: "email", placeholder: "you@example.com" },
+        password: { label: "Password", type: "password" },
+      },
+      async authorize(credentials) {
+        const email = (credentials?.email || "").trim().toLowerCase();
+        const password = credentials?.password || "";
+        if (!email || !password) return null;
+
+        // Validate against the backend user store (per-user org isolation).
+        try {
+          const res = await fetch(`${API_URL}/users/login`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, password }),
+          });
+          if (!res.ok) return null;
+          const data = await res.json();
+          return { id: data.id, name: data.full_name, email, org_id: data.org_id } as any;
+        } catch {
+          return null;
+        }
+      },
     }),
   ],
   secret: process.env.NEXTAUTH_SECRET || "fallback_secret_for_local_dev",
+  session: { strategy: "jwt" as const },
+  pages: { signIn: "/login" },
   callbacks: {
-    async signIn({ user }: { user: any }) {
-      try {
-        const response = await fetch(`${process.env.INTERNAL_API_URL || "http://127.0.0.1:8000"}/users/sync`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            email: user.email,
-            full_name: user.name || "Google User",
-          }),
-        });
-        if (response.ok) {
-          const data = await response.json();
-          user.id = data.id;
-          user.org_id = data.org_id;
-          return true;
-        }
-      } catch (error) {
-        console.error("User sync failed:", error);
-      }
-      // If sync fails, allow login but with fallback demo values
-      user.org_id = "11111111-1111-1111-1111-111111111111";
-      user.id = "22222222-2222-2222-2222-222222222222";
-      return true;
-    },
     async jwt({ token, user }: { token: any; user?: any }) {
       if (user) {
         token.id = user.id;

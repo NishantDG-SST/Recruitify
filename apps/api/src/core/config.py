@@ -20,7 +20,7 @@ class Settings:
     openai_base_url: str = os.getenv("OPENAI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
     llm_model: str = os.getenv("LLM_MODEL", "gemini-1.5-flash")
-    embedding_model: str = os.getenv("EMBEDDING_MODEL", "text-embedding-004")
+    embedding_model: str = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
     embedding_dimensions: int = int(os.getenv("EMBEDDING_DIMENSIONS", "768"))
 
     def broker_list(self) -> list[str]:

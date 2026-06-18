@@ -21,7 +21,7 @@ class LLMConfig:
     base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
     gemini_api_key: str = ""
     model: str = "gemini-1.5-flash"
-    embedding_model: str = "text-embedding-004"
+    embedding_model: str = "gemini-embedding-001"
     embedding_dimensions: int = 768
     temperature: float = 0.1
     max_tokens: int = 4096
@@ -119,14 +119,19 @@ class LLMClient:
                         
         raise last_exception
 
-    def complete_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
-        """Send a chat completion request and parse the response as JSON."""
+    def complete_json(self, system_prompt: str, user_prompt: str, max_tokens: Optional[int] = None) -> Dict[str, Any]:
+        """Send a chat completion request and parse the response as JSON.
+
+        ``max_tokens`` overrides the configured cap for this call — keep it small for
+        short structured outputs (providers count the reservation against the TPM limit).
+        """
         if not self._client:
             raise RuntimeError("LLM not configured")
-            
+
         import time
         import random
-        
+
+        eff_max = max_tokens if max_tokens is not None else self._config.max_tokens
         models = [self._config.model, "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
         seen = set()
         model_rotation = [x for x in models if not (x in seen or seen.add(x))]
@@ -141,7 +146,7 @@ class LLMClient:
                         {"role": "user", "content": user_prompt},
                     ],
                     temperature=self._config.temperature,
-                    max_tokens=self._config.max_tokens,
+                    max_tokens=eff_max,
                     response_format={"type": "json_object"},
                 )
                 raw = response.choices[0].message.content or "{}"
@@ -169,7 +174,7 @@ class LLMClient:
                             {"role": "user", "content": user_prompt},
                         ],
                         temperature=self._config.temperature,
-                        max_tokens=self._config.max_tokens,
+                        max_tokens=eff_max,
                         response_format={"type": "json_object"},
                     )
                     raw = response.choices[0].message.content or "{}"
@@ -196,26 +201,45 @@ class LLMClient:
         import math
         
         gemini_key = os.getenv("GEMINI_API_KEY", self._config.gemini_api_key)
-        
-        # If valid key is provided, use real Gemini embeddings
+        dims = self._config.embedding_dimensions
+        model = self._config.embedding_model
+
+        # If a valid Gemini key is provided, use real Gemini embeddings via the
+        # native batchEmbedContents endpoint (the OpenAI-compat path / older
+        # text-embedding-004 model are no longer available).
         if gemini_key and not gemini_key.startswith("gsk_"):
             try:
-                embed_client = OpenAI(
-                    api_key=gemini_key,
-                    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-                    max_retries=3,
-                ) if OpenAI else None
-                
-                if embed_client:
-                    response = embed_client.embeddings.create(
-                        model=self._config.embedding_model,
-                        input=texts,
-                        dimensions=self._config.embedding_dimensions,
-                    )
-                    return [item.embedding for item in response.data]
+                import httpx
+
+                url = (
+                    f"https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{model}:batchEmbedContents?key={gemini_key}"
+                )
+                payload = {
+                    "requests": [
+                        {
+                            "model": f"models/{model}",
+                            "content": {"parts": [{"text": t or " "}]},
+                            "outputDimensionality": dims,
+                        }
+                        for t in texts
+                    ]
+                }
+                resp = httpx.post(url, json=payload, timeout=30.0)
+                resp.raise_for_status()
+                embeddings = resp.json().get("embeddings", [])
+                if len(embeddings) == len(texts):
+                    out: list[list[float]] = []
+                    for item in embeddings:
+                        v = item.get("values", [])
+                        # Normalize to unit length (recommended for <3072-dim Gemini embeddings, and required for stable cosine).
+                        mag = math.sqrt(sum(x * x for x in v)) or 1.0
+                        out.append([x / mag for x in v])
+                    return out
+                logger.warning("Gemini embedding returned %d vectors for %d inputs; falling back", len(embeddings), len(texts))
             except Exception as e:
                 logger.warning("Real Gemini embedding failed, falling back to local mock vectors: %s", e)
-        
+
         # Graceful fallback: local deterministic pseudo-embeddings (unit normalized)
         results = []
         for text in texts:

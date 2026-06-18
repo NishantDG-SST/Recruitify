@@ -15,120 +15,98 @@ from core.auth import SecurityContext, get_security_context
 from services.ranking.repository import RankingOutputRecord, RankingRepository
 from services.ranking.explanation import RankingExplanationService
 from services.llm.client import LLMClient, LLMConfig
+from services.scoring.llm_judge import score_fit, reconcile_requirements, _requirement_satisfied
 
 router = APIRouter(prefix="/jobs/{job_id}/rankings", tags=["rankings"])
 
 # ---------------------------------------------------------------------------
-# Semantic skill matching helpers
+# Scoring configuration (sourced from the ranking_models table; the constants
+# below are only the seed/last-resort defaults if no model row exists).
 # ---------------------------------------------------------------------------
 
-_SKILL_SYNONYMS: dict[str, set[str]] = {
-    "python": {"python3", "python2", "cpython", "python programming"},
-    "javascript": {"js", "ecmascript", "es6", "es2015", "vanilla js"},
-    "typescript": {"ts"},
-    "react": {"reactjs", "react.js", "react js"},
-    "angular": {"angularjs", "angular.js"},
-    "vue": {"vuejs", "vue.js"},
-    "node": {"nodejs", "node.js", "node js"},
-    "express": {"expressjs", "express.js"},
-    "nextjs": {"next.js", "next js", "next"},
-    "aws": {"amazon web services", "amazon aws", "cloud computing"},
-    "gcp": {"google cloud", "google cloud platform", "vertex ai", "bigquery", "gke"},
-    "azure": {"microsoft azure", "azure cloud"},
-    "docker": {"containerization", "containers"},
-    "kubernetes": {"k8s", "container orchestration"},
-    "terraform": {"infrastructure as code", "iac"},
-    "postgres": {"postgresql", "pg"},
-    "mysql": {"mariadb"},
-    "mongodb": {"mongo"},
-    "redis": {"caching"},
-    "kafka": {"apache kafka", "event streaming"},
-    "ci/cd": {"continuous integration", "continuous deployment", "cicd", "ci cd", "devops"},
-    "git": {"github", "gitlab", "version control", "source control"},
-    "machine learning": {"ml", "deep learning", "ai", "artificial intelligence"},
-    "rest": {"restful", "rest api", "restful api"},
-    "graphql": {"graph ql"},
-    "microservices": {"micro services", "microservice architecture"},
-    "agile": {"scrum", "kanban"},
-    "pandas": {"data analysis"},
-    "spark": {"apache spark", "pyspark"},
-    "java": {"jvm", "j2ee", "spring", "spring boot"},
-    "c++": {"cpp", "c plus plus"},
-    "c#": {"csharp", "c sharp", ".net", "dotnet"},
-    "ruby": {"ruby on rails", "rails", "ror"},
-    "go": {"golang"},
-    "rust": {"rustlang"},
+DEFAULT_RANKING_CONFIG = {
+    "weights": {"skills": 0.4, "experience": 0.15, "education": 0.1, "semantic_similarity": 0.35},
+    "skills_gate": 0.15,        # below this normalized skills score, experience/education are zeroed
+    "shortlist_threshold": 40.0,
 }
 
-# Build reverse lookup
-_SKILL_CANON: dict[str, str] = {}
-for _canon, _syns in _SKILL_SYNONYMS.items():
-    _SKILL_CANON[_canon] = _canon
-    for _s in _syns:
-        _SKILL_CANON[_s] = _canon
+
+def load_ranking_config(database) -> dict:
+    """Load scoring weights/thresholds from the active ranking model, with safe defaults."""
+    row = None
+    try:
+        row = database.fetchone("SELECT metadata_json FROM ranking_models ORDER BY created_at DESC LIMIT 1", [])
+    except Exception:
+        row = None
+    meta = row[0] if row and row[0] else None
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except Exception:
+            meta = None
+    if not isinstance(meta, dict):
+        meta = {}
+    return {
+        "weights": meta.get("weights") or DEFAULT_RANKING_CONFIG["weights"],
+        "skills_gate": float(meta.get("skills_gate", DEFAULT_RANKING_CONFIG["skills_gate"])),
+        "shortlist_threshold": float(meta.get("shortlist_threshold", DEFAULT_RANKING_CONFIG["shortlist_threshold"])),
+    }
 
 
-def _canonicalize(skill: str) -> str:
-    s = skill.lower().strip()
-    return _SKILL_CANON.get(s, s)
+def get_fit(database, llm, candidate_id, profile: dict, job_parsed: dict, job_version_id, force: bool = False) -> dict:
+    """Return the LLM-judged fit for a candidate against a job, cached per job_version_id.
 
-
-def semantic_skill_match_score(cand_skills: list[str], job_skills: list[str]) -> float:
-    """Compute semantic skill match percentage (0-100).
-    
-    Uses synonym mapping + substring matching as fallback.
+    Cache lives in candidate_snapshots.profile_json.llm_fit, keyed by job_version_id so a
+    snapshot can be scored against multiple jobs without overwrite. generate_rankings passes
+    force=True; read paths (display/simulate/modal) reuse the cache → no LLM calls, deterministic.
     """
-    if not job_skills:
-        return 100.0
-    
-    cand_canon = {_canonicalize(s) for s in cand_skills}
-    cand_raw = {s.lower().strip() for s in cand_skills}
-    matched = 0
-    
-    for js in job_skills:
-        js_canon = _canonicalize(js)
-        js_low = js.lower().strip()
-        
-        # Exact canonical match
-        if js_canon in cand_canon:
-            matched += 1
-            continue
-        
-        # Check if any candidate skill contains the job skill or vice versa
-        found = False
-        for cs in cand_raw:
-            if js_low in cs or cs in js_low:
-                found = True
-                break
-            # Also check canonical forms
-            cs_canon = _canonicalize(cs)
-            if js_canon in cs_canon or cs_canon in js_canon:
-                found = True
-                break
-        if found:
-            matched += 1
-    
-    return (matched / len(job_skills)) * 100.0
+    key = str(job_version_id)
+    llm_fit = profile.get("llm_fit") or {}
+    if not force and key in llm_fit:
+        return llm_fit[key]
+
+    fit = score_fit(job_parsed, profile, llm)
+    llm_fit[key] = fit
+    profile["llm_fit"] = llm_fit  # keep the in-memory profile consistent
+
+    if candidate_id and database is not None and database.is_configured:
+        # Write the full merged map; the shallow `||` merge replaces the whole llm_fit key,
+        # so sibling jobs' entries (already in llm_fit) survive.
+        database.execute(
+            "UPDATE candidate_snapshots SET profile_json = profile_json || %s::jsonb "
+            "WHERE candidate_id = %s AND snapshot_version = "
+            "(SELECT MAX(snapshot_version) FROM candidate_snapshots WHERE candidate_id = %s)",
+            [json.dumps({"llm_fit": llm_fit}), candidate_id, candidate_id],
+        )
+    return fit
 
 
 def compute_experience_score(cand_profile: dict, job_parsed: dict) -> float:
     """Compute experience score based on candidate years of experience (0-100)."""
-    name = (cand_profile.get("name") or "").lower()
-    if "tanmay bose" in name:
-        return 80.0
     try:
         cand_exp = int(cand_profile.get("years_experience") or 0)
     except:
         cand_exp = 0
 
-    # Explicitly check for Kartik Singhania, Riya Sharma, Lakshmi Venkat, or anyone with fresher/intern keywords
-    if any(n in name for n in ["riya sharma", "kartik singhania", "lakshmi venkat"]):
-        return 10.0
+    try:
+        required = int(job_parsed.get("years_experience_min") or 0)
+    except (TypeError, ValueError):
+        required = 0
 
-    raw_text = (cand_profile.get("raw_text") or "").lower()
-    if cand_exp == 0 or "intern" in raw_text or "fresher" in raw_text or "entry-level" in raw_text or "student" in raw_text:
-        return 15.0
+    # When years of experience couldn't be parsed (0), fall back to resume signals.
+    # Use word-boundary matching so "international" / "internal" don't match "intern".
+    if cand_exp == 0:
+        raw_text = (cand_profile.get("raw_text") or "").lower()
+        if re.search(r"\b(intern|internship|fresher|entry[- ]level|student|recent graduate)\b", raw_text):
+            return 15.0
+        return 20.0
 
+    # Score relative to what the job actually requires: meeting/exceeding the
+    # minimum scores 100, and candidates below it scale down proportionally.
+    if required > 0:
+        return round(min(100.0, (cand_exp / required) * 100.0), 1)
+
+    # No minimum specified on the job — fall back to an absolute experience ladder.
     if cand_exp >= 7:
         return 100.0
     elif cand_exp >= 4:
@@ -139,112 +117,6 @@ def compute_experience_score(cand_profile: dict, job_parsed: dict) -> float:
         return 40.0
     else:
         return 20.0
-
-
-def compute_domain_score(cand_profile: dict, job_parsed: dict) -> float:
-    """Compute domain knowledge score (0-100).
-    
-    Uses domain overlap + keyword relevance from resume raw text.
-    """
-    name = (cand_profile.get("name") or "").lower()
-    if "tanmay bose" in name:
-        return 85.0
-    if any(n in name for n in ["riya sharma", "kartik singhania", "lakshmi venkat", "meena subramaniam"]):
-        return 10.0
-        
-    raw_text = (cand_profile.get("raw_text") or "").lower()
-    cand_roles = [r.lower().strip() for r in (cand_profile.get("roles") or [])]
-        
-    job_domains = [d.lower().strip() for d in (job_parsed.get("domains") or [])]
-    if not job_domains:
-        # Fallback to software engineering domains if empty
-        job_domains = ["software engineering", "systems architecture", "backend engineering", "fullstack development"]
-    
-    domain_keywords: dict[str, list[str]] = {
-        "fintech": ["fintech", "financial", "banking", "payments", "trading", "finance", "investment"],
-        "healthcare": ["healthcare", "medical", "health", "clinical", "hospital", "patient"],
-        "e-commerce": ["ecommerce", "e-commerce", "retail", "marketplace", "shopping", "commerce"],
-        "saas": ["saas", "software as a service", "platform", "b2b", "subscription"],
-        "edtech": ["edtech", "education", "learning", "academic"],
-        "cybersecurity": ["security", "cybersecurity", "infosec", "vulnerability"],
-        "logistics": ["logistics", "supply chain", "warehouse", "shipping"],
-        "media": ["media", "content", "publishing", "streaming"],
-        "gaming": ["gaming", "game", "esports"],
-        "banking": ["banking", "bank", "financial services"],
-        "insurance": ["insurance", "insurtech"],
-        "telecom": ["telecom", "telecommunications"],
-        "energy": ["energy", "oil", "renewable"],
-        "automotive": ["automotive", "vehicle", "autonomous"],
-        "travel": ["travel", "hospitality", "tourism"],
-        "platform engineering": ["platform", "infrastructure", "devops", "sre", "reliability"],
-        "high scale": ["scale", "high scale", "distributed", "performance", "scalability", "millions"],
-        "software engineering": ["software engineer", "developer", "programming", "software development", "computer science", "coding"],
-        "systems architecture": ["system architecture", "scalability", "distributed system", "microservices"],
-        "backend engineering": ["backend", "api", "database", "sql", "server"],
-        "fullstack development": ["fullstack", "frontend", "backend", "web development", "react", "node"],
-    }
-    
-    cand_domains = [d.lower().strip() for d in (cand_profile.get("domains") or [])]
-    
-    matched = 0
-    for jd in job_domains:
-        # Direct match
-        if jd in cand_domains:
-            matched += 1
-            continue
-        
-        # Keyword-based relevance from raw text and roles
-        keywords = domain_keywords.get(jd, [jd])
-        found = False
-        for kw in keywords:
-            if kw in raw_text or any(kw in role for role in cand_roles):
-                found = True
-                break
-        if found:
-            matched += 1
-            
-    score = (matched / len(job_domains)) * 100.0
-    if "lakshmi" in name or "meena" in name:
-        return min(15.0, score)
-    return score
-
-
-def compute_soft_skills_score(cand_profile: dict, job_parsed: dict) -> float:
-    """Compute soft skills match score (0-100).
-    
-    Uses direct matching + inference from resume action verbs/phrases.
-    """
-    name = (cand_profile.get("name") or "").lower()
-    if "tanmay bose" in name:
-        return 80.0
-    raw_text = (cand_profile.get("raw_text") or "").lower()
-    cand_soft = {s.lower().strip() for s in (cand_profile.get("soft_skills") or [])}
-    
-    # Check if they belong to the explicitly restricted list:
-    # Riya Sharma, Kartik Singhania, Lakshmi Venkat, Pooja Desai must score below 30%
-    if any(n in name for n in ["riya sharma", "kartik singhania", "lakshmi venkat", "pooja desai"]):
-        return 10.0
-        
-    leadership_signals = ["led team", "managed team", "team lead", "head of", "director of", "vp of", "chief", "founded", "built team", "leadership", "manager", "lead engineer", "management"]
-    mentoring_signals = ["mentored", "coached", "trained", "onboarded", "junior developers", "interns", "mentorship", "mentoring"]
-    
-    has_leadership = any(sig in raw_text for sig in leadership_signals) or "leadership" in cand_soft
-    has_mentoring = any(sig in raw_text for sig in mentoring_signals) or "mentoring" in cand_soft
-    
-    if not (has_leadership or has_mentoring):
-        return 0.0
-        
-    score = 0.0
-    if has_leadership:
-        score += 50.0
-    if has_mentoring:
-        score += 50.0
-        
-    other_soft = cand_soft - {"leadership", "mentoring"}
-    if other_soft:
-        score = min(100.0, score + len(other_soft) * 5.0)
-        
-    return score
 
 
 def get_cached_explanation(database, job_version_id: str, snapshot_id: str) -> str | None:
@@ -294,7 +166,7 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
         SELECT c.id, s.profile_json, s.id
         FROM candidates c
         JOIN candidate_snapshots s ON c.id = s.candidate_id
-        WHERE c.status IN ('extracted', 'interview', 'interviewing')
+        WHERE c.status IN ('extracted', 'interview', 'interviewing', 'selected', 'rejected')
           AND s.profile_json->>'job_id' = %s
           AND c.org_id = %s
         """,
@@ -317,33 +189,41 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
         repo = RankingRepository(database)
         run_outputs = repo.list_outputs(latest_run_id)
         if run_outputs:
-            run_snapshots = {str(o.candidate_snapshot_id) for o in run_outputs}
             current_snapshots_str = {str(sid) for sid in current_snapshots}
-            # If the sets of candidate snapshots are identical, return cached outputs
-            if run_snapshots == current_snapshots_str:
+            # Render the latest run intersected with the CURRENT roster: candidates removed
+            # since the run are filtered out; candidates added since (not yet scored) simply
+            # don't appear until the post-upload incremental run includes them. The ranking is
+            # never blanked just because a new candidate was added.
+            if current_snapshots_str:
                 ranked_candidates = []
                 sorted_outputs = sorted(run_outputs, key=lambda x: x.rank)
                 for o in sorted_outputs:
+                    if str(o.candidate_snapshot_id) not in current_snapshots_str:
+                        continue  # candidate no longer exists for this job
                     cand_row = database.fetchone(
-                        "SELECT candidate_id, profile_json FROM candidate_snapshots WHERE id = %s",
+                        "SELECT cs.candidate_id, cs.profile_json, c.status "
+                        "FROM candidate_snapshots cs JOIN candidates c ON c.id = cs.candidate_id "
+                        "WHERE cs.id = %s",
                         [o.candidate_snapshot_id]
                     )
                     cand_id = cand_row[0] if cand_row else ""
                     profile_json = cand_row[1] if cand_row and cand_row[1] else {}
+                    cand_status = cand_row[2] if cand_row else None
                     if isinstance(profile_json, str):
                         try:
                             profile_json = json.loads(profile_json)
                         except:
                             profile_json = {}
-                    
+
                     cand_name = profile_json.get("name", "Unknown Candidate")
-                    
-                    # Compute category scores
-                    hard_skills_score = semantic_skill_match_score(profile_json.get("skills", []), job_skills_list)
-                    soft_skills_score = compute_soft_skills_score(profile_json, parsed_json)
+
+                    # Category scores from the cached LLM-judged fit (read-only; no LLM call)
+                    fit = get_fit(database, None, cand_id, profile_json, parsed_json, job_version_id, force=False)
+                    hard_skills_score = fit["hard_skills"]
+                    soft_skills_score = fit["soft_skills"]
                     experience_score = compute_experience_score(profile_json, parsed_json)
-                    domain_score = compute_domain_score(profile_json, parsed_json)
-                    
+                    domain_score = fit["domain_knowledge"]
+
                     ranked_candidates.append(
                         RankingCandidate(
                             candidate_id=str(cand_id),
@@ -356,11 +236,13 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
                                 "soft_skills": soft_skills_score,
                                 "experience": experience_score,
                                 "domain_knowledge": domain_score
-                            }
+                            },
+                            status=cand_status,
                         )
                     )
-                logger.info("Returning cached ranking run %s from database", latest_run_id)
-                return RankingResponse(run_id=str(latest_run_id), candidates=ranked_candidates)
+                if ranked_candidates:
+                    logger.info("Returning ranking run %s (%d of %d run outputs still current)", latest_run_id, len(ranked_candidates), len(run_outputs))
+                    return RankingResponse(run_id=str(latest_run_id), candidates=ranked_candidates)
 
     # If no cached run exists or it doesn't match the current candidate set, return empty list
     logger.info("No matching cached ranking run found for job version %s", job_version_id)
@@ -369,6 +251,17 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
 
 @router.post("", response_model=RankingResponse)
 def generate_rankings(job_id: str, security: SecurityContext = Depends(get_security_context)) -> RankingResponse:
+    """Explicit (re)ranking via the Recalculate button — re-judges every candidate (force=True)."""
+    return run_ranking(job_id, security, force=True)
+
+
+def run_ranking(job_id: str, security: SecurityContext, force: bool = True) -> RankingResponse:
+    """Score the current roster for a job and persist a ranking run.
+
+    force=True re-judges every candidate (explicit Recalculate, e.g. after a job edit or a
+    model change). force=False reuses cached per-candidate fits and only judges candidates
+    not yet scored — the cheap incremental run triggered in the background after an upload.
+    """
     import os
     import logging
     logger = logging.getLogger(__name__)
@@ -401,16 +294,18 @@ def generate_rankings(job_id: str, security: SecurityContext = Depends(get_secur
     # 2. Fetch extracted candidates linked to this job (scoped to org_id)
     candidate_rows = database.fetchall(
         """
-        SELECT c.id, s.profile_json, s.id
+        SELECT c.id, s.profile_json, s.id, c.status
         FROM candidates c
         JOIN candidate_snapshots s ON c.id = s.candidate_id
-        WHERE c.status IN ('extracted', 'interview', 'interviewing')
+        WHERE c.status IN ('extracted', 'interview', 'interviewing', 'selected', 'rejected')
           AND s.profile_json->>'job_id' = %s
           AND c.org_id = %s
         """,
         [job_id, security.org_id]
     )
-    
+    cand_status_map = {str(row[0]): row[3] for row in candidate_rows}
+    ranking_cfg = load_ranking_config(database)
+
     matcher = MatchingEngine()
     scorer = ScoringEngine()
     decider = DecisionEngine()
@@ -425,7 +320,14 @@ def generate_rankings(job_id: str, security: SecurityContext = Depends(get_secur
         embedding_dimensions=settings.embedding_dimensions,
     ))
     explainer = RankingExplanationService(llm)
-    
+    # Dedicated temperature-0 client for the fit judge (stable, deterministic scores)
+    judge_llm = LLMClient(LLMConfig(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
+        model=settings.llm_model,
+        temperature=0.0,
+    ))
+
     # Generate job embedding dynamically
     job_embedding_vector = [0.0] * 768
     try:
@@ -478,9 +380,14 @@ def generate_rankings(job_id: str, security: SecurityContext = Depends(get_secur
             "education": 1.0
         }
         
-        # Include individual must-haves in features
+        # LLM-judged fit (fresh per run, cached per job_version_id)
+        fit = get_fit(database, judge_llm, cand_id, profile, parsed_json, job_version_id, force=force)
+        cand_skills_list = profile.get("skills", [])
+        cand_domains_list = profile.get("domains", [])
+
+        # Include individual must-haves in features (3-way reconciliation, robust to drift/omission)
         for mh in must_have_skills:
-            cand_score_features[mh] = 1.0 if mh in cand_skills else 0.0
+            cand_score_features[mh] = 1.0 if _requirement_satisfied(mh, fit["matched_skills"], fit["missing_skills"], cand_skills_list, cand_domains_list) else 0.0
             job_score_features[mh] = 1.0
         
         # Fetch candidate embedding from DB
@@ -496,11 +403,11 @@ def generate_rankings(job_id: str, security: SecurityContext = Depends(get_secur
             cand_embedding_vector = val
             logger.info("Loaded real embedding for candidate snapshot %s", snap_id)
 
-        # Calculate consistent category scores
-        hard_skills_score = semantic_skill_match_score(profile.get("skills", []), job_skills_list)
-        soft_skills_score = compute_soft_skills_score(profile, parsed_json)
+        # Category scores: skills/soft/domain from the LLM judge, experience deterministic
+        hard_skills_score = fit["hard_skills"]
+        soft_skills_score = fit["soft_skills"]
         experience_score = compute_experience_score(profile, parsed_json)
-        domain_score = compute_domain_score(profile, parsed_json)
+        domain_score = fit["domain_knowledge"]
 
         name_lower = cand_name.lower()
 
@@ -518,14 +425,21 @@ def generate_rankings(job_id: str, security: SecurityContext = Depends(get_secur
         # Overwrite scores to use the correct category values for final scoring
         semantic_sim = match_result.scores.get("semantic_similarity", 0.0)
         match_result.scores["skills"] = hard_skills_score / 100.0
-        match_result.scores["experience"] = experience_score / 100.0
-        match_result.scores["education"] = domain_score / 100.0
+        
+        # Apply Gating logic
+        if match_result.scores["skills"] < ranking_cfg["skills_gate"]:
+            match_result.scores["experience"] = 0.0
+            match_result.scores["education"] = 0.0
+        else:
+            match_result.scores["experience"] = experience_score / 100.0
+            match_result.scores["education"] = domain_score / 100.0
+
         match_result.scores["semantic_similarity"] = 0.7 * (soft_skills_score / 100.0) + 0.3 * semantic_sim
 
         score_result = scorer.score(
             ScoreInput(
                 match_scores=match_result.scores,
-                weights={"skills": 0.4, "experience": 0.3, "education": 0.2, "semantic_similarity": 0.1},
+                weights=ranking_cfg["weights"],
                 must_have=must_have_skills,
                 evidence={key: [ScoreEvidence(source="match", text="")] for key in match_result.scores}
             )
@@ -562,7 +476,7 @@ def generate_rankings(job_id: str, security: SecurityContext = Depends(get_secur
         )
         
     # Rank
-    decisions = decider.rank(decision_inputs, threshold=40.0)
+    decisions = decider.rank(decision_inputs, threshold=ranking_cfg["shortlist_threshold"])
     
     ranked = []
     output_records = []
@@ -605,7 +519,8 @@ def generate_rankings(job_id: str, security: SecurityContext = Depends(get_secur
                 score=cand_info["score"],
                 rank=d.rank,
                 explanation_text=explanation,
-                category_scores=cand_info.get("category_scores", {})
+                category_scores=cand_info.get("category_scores", {}),
+                status=cand_status_map.get(str(d.candidate_id)),
             )
         )
 
@@ -638,6 +553,7 @@ def simulate_ranking(
     decider = DecisionEngine()
     database = get_database(settings.database_dsn)
     repo = RankingRepository(database)
+    ranking_cfg = load_ranking_config(database)
     gemini_key = os.getenv("GEMINI_API_KEY", settings.gemini_api_key)
     llm = LLMClient(LLMConfig(
         api_key=settings.openai_api_key,
@@ -648,7 +564,7 @@ def simulate_ranking(
         embedding_dimensions=settings.embedding_dimensions,
     ))
     explainer = RankingExplanationService(llm)
-    
+
     # Fetch the latest job version id for this job_id (scoped to org_id)
     job_version_row = database.fetchone(
         """
@@ -719,21 +635,11 @@ def simulate_ranking(
                 except Exception:
                     profile_json = {}
 
-            job_skills_list = (parsed_json.get("must_have_skills") or []) + (parsed_json.get("nice_to_have_skills") or [])
-            hard_skills_score = semantic_skill_match_score(profile_json.get("skills", []), job_skills_list)
-            soft_skills_score = compute_soft_skills_score(profile_json, parsed_json)
+            fit = get_fit(database, llm, candidate.candidate_id, profile_json, parsed_json, job_version_id, force=False)
+            hard_skills_score = fit["hard_skills"]
+            soft_skills_score = fit["soft_skills"]
             experience_score = compute_experience_score(profile_json, parsed_json)
-            domain_score = compute_domain_score(profile_json, parsed_json)
-
-            name_lower = (profile_json.get("name") or "").lower()
-            if "tanmay bose" in name_lower:
-                hard_skills_score = 90.0
-            elif "kartik singhania" in name_lower:
-                hard_skills_score = 15.0
-            elif "riya sharma" in name_lower:
-                hard_skills_score = 10.0
-            elif "lakshmi venkat" in name_lower:
-                hard_skills_score = 5.0
+            domain_score = fit["domain_knowledge"]
 
             match_result = matcher.match(
                 MatchInput(
@@ -748,8 +654,15 @@ def simulate_ranking(
             # Overwrite scores to use the correct category values for final scoring
             semantic_sim = match_result.scores.get("semantic_similarity", 0.0)
             match_result.scores["skills"] = hard_skills_score / 100.0
-            match_result.scores["experience"] = experience_score / 100.0
-            match_result.scores["education"] = domain_score / 100.0
+            
+            # Apply Gating logic
+            if match_result.scores["skills"] < ranking_cfg["skills_gate"]:
+                match_result.scores["experience"] = 0.0
+                match_result.scores["education"] = 0.0
+            else:
+                match_result.scores["experience"] = experience_score / 100.0
+                match_result.scores["education"] = domain_score / 100.0
+
             match_result.scores["semantic_similarity"] = 0.7 * (soft_skills_score / 100.0) + 0.3 * semantic_sim
 
             score_result = scorer.score(
@@ -785,16 +698,17 @@ def simulate_ranking(
                 )
             )
 
-        decisions = decider.rank(decision_inputs, threshold=payload.threshold or 40.0)
+        decisions = decider.rank(decision_inputs, threshold=payload.threshold or ranking_cfg["shortlist_threshold"])
         
         for item in decisions:
             cand_input = candidate_lookup[item.candidate_id]
             snap_row = database.fetchone(
-                "SELECT s.id, s.profile_json FROM candidate_snapshots s JOIN candidates c ON s.candidate_id = c.id WHERE s.candidate_id = %s AND c.org_id = %s ORDER BY s.snapshot_version DESC LIMIT 1",
+                "SELECT s.id, s.profile_json, c.status FROM candidate_snapshots s JOIN candidates c ON s.candidate_id = c.id WHERE s.candidate_id = %s AND c.org_id = %s ORDER BY s.snapshot_version DESC LIMIT 1",
                 [item.candidate_id, security.org_id]
             )
             snap_id = snap_row[0] if snap_row else item.candidate_id
             profile_json = snap_row[1] if snap_row and snap_row[1] else {}
+            cand_status = snap_row[2] if snap_row else None
             if isinstance(profile_json, str):
                 try:
                     profile_json = json.loads(profile_json)
@@ -839,7 +753,8 @@ def simulate_ranking(
                     score=scored.get(item.candidate_id, 0.0),
                     rank=item.rank,
                     explanation_text=explanation,
-                    category_scores=cand_category_scores
+                    category_scores=cand_category_scores,
+                    status=cand_status,
                 )
             )
             output_records.append(
@@ -863,15 +778,16 @@ def simulate_ranking(
 
         candidate_rows = database.fetchall(
             """
-            SELECT c.id, s.profile_json, s.id
+            SELECT c.id, s.profile_json, s.id, c.status
             FROM candidates c
             JOIN candidate_snapshots s ON c.id = s.candidate_id
-            WHERE c.status IN ('extracted', 'interview', 'interviewing')
+            WHERE c.status IN ('extracted', 'interview', 'interviewing', 'selected', 'rejected')
               AND s.profile_json->>'job_id' = %s
               AND c.org_id = %s
             """,
             [job_id, security.org_id]
         )
+        cand_status_map = {str(row[0]): row[3] for row in candidate_rows}
 
         job_embedding_vector = [0.0] * 768
         try:
@@ -913,10 +829,11 @@ def simulate_ranking(
                 "education": 1.0
             }
             
+            fit = get_fit(database, llm, cand_id, profile_json, parsed_json, job_version_id, force=False)
             for mh in must_have_skills:
-                cand_score_features[mh] = 1.0 if mh in cand_skills else 0.0
+                cand_score_features[mh] = 1.0 if _requirement_satisfied(mh, fit["matched_skills"], fit["missing_skills"], profile_json.get("skills", []), profile_json.get("domains", [])) else 0.0
                 job_score_features[mh] = 1.0
-            
+
             cand_embedding_vector = [0.0] * 768
             emb_row = database.fetchone(
                 "SELECT embedding FROM candidate_embeddings WHERE candidate_snapshot_id = %s",
@@ -929,20 +846,10 @@ def simulate_ranking(
                 cand_embedding_vector = val
 
             job_skills_list = (parsed_json.get("must_have_skills") or []) + (parsed_json.get("nice_to_have_skills") or [])
-            hard_skills_score = semantic_skill_match_score(profile_json.get("skills", []), job_skills_list)
-            soft_skills_score = compute_soft_skills_score(profile_json, parsed_json)
+            hard_skills_score = fit["hard_skills"]
+            soft_skills_score = fit["soft_skills"]
             experience_score = compute_experience_score(profile_json, parsed_json)
-            domain_score = compute_domain_score(profile_json, parsed_json)
-
-            name_lower = cand_name.lower()
-            if "tanmay bose" in name_lower:
-                hard_skills_score = 90.0
-            elif "kartik singhania" in name_lower:
-                hard_skills_score = 15.0
-            elif "riya sharma" in name_lower:
-                hard_skills_score = 10.0
-            elif "lakshmi venkat" in name_lower:
-                hard_skills_score = 5.0
+            domain_score = fit["domain_knowledge"]
 
             match_result = matcher.match(
                 MatchInput(
@@ -957,8 +864,15 @@ def simulate_ranking(
             # Overwrite scores to use the correct category values for final scoring
             semantic_sim = match_result.scores.get("semantic_similarity", 0.0)
             match_result.scores["skills"] = hard_skills_score / 100.0
-            match_result.scores["experience"] = experience_score / 100.0
-            match_result.scores["education"] = domain_score / 100.0
+            
+            # Apply Gating logic
+            if match_result.scores["skills"] < ranking_cfg["skills_gate"]:
+                match_result.scores["experience"] = 0.0
+                match_result.scores["education"] = 0.0
+            else:
+                match_result.scores["experience"] = experience_score / 100.0
+                match_result.scores["education"] = domain_score / 100.0
+
             match_result.scores["semantic_similarity"] = 0.7 * (soft_skills_score / 100.0) + 0.3 * semantic_sim
 
             score_result = scorer.score(
@@ -999,7 +913,7 @@ def simulate_ranking(
                 )
             )
 
-        decisions = decider.rank(decision_inputs, threshold=payload.threshold or 40.0)
+        decisions = decider.rank(decision_inputs, threshold=payload.threshold or ranking_cfg["shortlist_threshold"])
         
         for d in decisions:
             cand_info = scored_candidates[d.candidate_id]
@@ -1040,7 +954,8 @@ def simulate_ranking(
                     score=cand_info["score"],
                     rank=d.rank,
                     explanation_text=explanation,
-                    category_scores=cand_info.get("category_scores", {})
+                    category_scores=cand_info.get("category_scores", {}),
+                    status=cand_status_map.get(str(d.candidate_id)),
                 )
             )
 

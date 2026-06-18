@@ -21,13 +21,8 @@ from services.features.extraction import ExtractionService
 from services.llm.client import LLMClient, LLMConfig
 from services.taxonomy.normalizer import TaxonomyNormalizer
 from services.interviews.generator import InterviewGenerator
-from api.routes.rankings import (
-    semantic_skill_match_score,
-    compute_soft_skills_score,
-    compute_domain_score,
-    compute_experience_score,
-    _canonicalize,
-)
+from api.routes.rankings import compute_experience_score, get_fit
+from services.scoring.llm_judge import reconcile_requirements
 
 router = APIRouter(prefix="/jobs/{job_id}/candidates", tags=["candidates"])
 logger = logging.getLogger(__name__)
@@ -40,6 +35,9 @@ def process_candidates_batch_background(
     settings_llm_base_url: str,
     settings_llm_model: str,
     settings_embedding_model: str,
+    job_id: str,
+    org_id: str,
+    user_id: str,
 ):
     from core.database import get_database
     from services.llm.client import LLMClient, LLMConfig
@@ -126,6 +124,19 @@ def process_candidates_batch_background(
             except Exception as db_err:
                 logger.error("Failed to mark candidate status as failed for %s: %s", candidate_id, db_err)
 
+    # All candidates in the batch are extracted + embedded. Refresh the job's ranking
+    # incrementally: run_ranking(force=False) reuses cached per-candidate fits and only
+    # judges the newly added candidates, then rewrites the run so they appear in the
+    # ranking without the user clicking Recalculate.
+    if job_id and org_id:
+        try:
+            from api.routes.rankings import run_ranking
+            from core.auth import SecurityContext
+            run_ranking(job_id, SecurityContext(org_id=org_id, user_id=user_id), force=False)
+            logger.info("Incremental ranking refreshed for job %s after upload batch", job_id)
+        except Exception as rank_err:
+            logger.warning("Incremental ranking after upload failed for job %s: %s", job_id, rank_err)
+
 
 @router.post("", response_model=CandidateUploadResponse, status_code=status.HTTP_202_ACCEPTED)
 def upload_candidates(
@@ -186,9 +197,44 @@ def upload_candidates(
         settings_llm_base_url=settings.llm_base_url,
         settings_llm_model=settings.llm_model,
         settings_embedding_model=settings.embedding_model,
+        job_id=job_id,
+        org_id=security.org_id,
+        user_id=security.user_id,
     )
 
     return CandidateUploadResponse(batch_id=batch_id)
+
+
+def _build_llm() -> LLMClient:
+    return LLMClient(LLMConfig(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
+        model=settings.llm_model,
+    ))
+
+
+def _update_latest_snapshot(database, candidate_id: str, patch: dict) -> None:
+    """Merge `patch` into the latest snapshot's profile_json for a candidate."""
+    database.execute(
+        "UPDATE candidate_snapshots SET profile_json = profile_json || %s::jsonb "
+        "WHERE candidate_id = %s AND snapshot_version = "
+        "(SELECT MAX(snapshot_version) FROM candidate_snapshots WHERE candidate_id = %s)",
+        [json.dumps(patch), candidate_id, candidate_id],
+    )
+
+
+def ensure_cv_summary(database, candidate_id: str, profile: dict) -> str:
+    """Return the candidate's CV summary, generating and caching it on first use."""
+    summary = profile.get("cv_summary") or ""
+    if summary:
+        return summary
+    from services.summaries.generator import SummaryService
+    summary, used_llm = SummaryService(_build_llm()).summarize_cv(profile)
+    profile["cv_summary"] = summary
+    # Only persist real LLM output; fallbacks are shown but not cached so they self-heal.
+    if used_llm:
+        _update_latest_snapshot(database, candidate_id, {"cv_summary": summary})
+    return summary
 
 
 @router.get("/details/{candidate_id}", response_model=CandidateDetailResponse)
@@ -222,9 +268,10 @@ def get_candidate_detail(
             target_job_id = None
 
     job_requirements = {}
+    job_version_id = None
     if target_job_id:
         job_row = database.fetchone(
-            "SELECT parsed_json FROM job_versions jv JOIN jobs j ON jv.job_id = j.id WHERE jv.job_id = %s AND j.org_id = %s ORDER BY jv.version DESC LIMIT 1",
+            "SELECT parsed_json, jv.id FROM job_versions jv JOIN jobs j ON jv.job_id = j.id WHERE jv.job_id = %s AND j.org_id = %s ORDER BY jv.version DESC LIMIT 1",
             [target_job_id, security.org_id]
         )
         if job_row and job_row[0]:
@@ -234,16 +281,26 @@ def get_candidate_detail(
                     job_requirements = json.loads(job_requirements)
                 except json.JSONDecodeError:
                     job_requirements = {}
+            job_version_id = job_row[1]
 
-    job_skills_list = (job_requirements.get("must_have_skills") or []) + (job_requirements.get("nice_to_have_skills") or [])
-    hard_skills_score = semantic_skill_match_score(profile.get("skills", []), job_skills_list)
-    soft_skills_score = compute_soft_skills_score(profile, job_requirements)
-
+    # Category scores from the LLM-judged fit (cached per job_version_id); experience is deterministic.
+    if job_version_id:
+        fit = get_fit(database, _build_llm(), candidate_id, profile, job_requirements, job_version_id, force=False)
+        hard_skills_score = fit["hard_skills"]
+        soft_skills_score = fit["soft_skills"]
+        domain_score = fit["domain_knowledge"]
+    else:
+        hard_skills_score = soft_skills_score = domain_score = 0.0
     experience_score = compute_experience_score(profile, job_requirements)
 
-    domain_score = compute_domain_score(profile, job_requirements)
-
     name_lower = (profile.get("name") or "").lower()
+
+    # Generate (and cache) an LLM summary of the CV for the candidate profile page.
+    if data.get("status") != "processing":
+        try:
+            ensure_cv_summary(database, candidate_id, profile)
+        except Exception:
+            logger.exception("Failed to generate CV summary for %s", candidate_id)
 
     scores = {
         "hard_skills": hard_skills_score,
@@ -397,7 +454,7 @@ def generate_interview_questions(
         [json.dumps(questions_list), snapshot_id]
     )
     
-    return {"status": "success", "questions_generated": len(questions_list)}
+    return {"status": "success", "questions_generated": len(questions_list), "questions": questions_list}
 
 
 @router.get("/{candidate_id}/profile", response_model=CandidateJobProfileResponse)
@@ -434,40 +491,12 @@ def get_candidate_job_profile(
         except json.JSONDecodeError:
             parsed_json = {}
             
-    # 3. Calculate matched & missing skills
-    must_have = parsed_json.get("must_have_skills") or []
-    nice_to_have = parsed_json.get("nice_to_have_skills") or []
-    job_skills_list = must_have + nice_to_have
-    
+    # 3. LLM-judged fit (cached per job_version_id), reconciled onto the job's wording
     cand_skills = profile.get("skills") or []
-    cand_canon = {_canonicalize(s) for s in cand_skills}
-    cand_raw = {s.lower().strip() for s in cand_skills}
-    
-    matched_skills = []
-    missing_skills = []
-    
-    for js in job_skills_list:
-        js_canon = _canonicalize(js)
-        js_low = js.lower().strip()
-        
-        if js_canon in cand_canon or js_low in cand_raw:
-            matched_skills.append(js)
-            continue
-            
-        found = False
-        for cs in cand_raw:
-            if js_low in cs or cs in js_low:
-                found = True
-                break
-            cs_canon = _canonicalize(cs)
-            if js_canon in cs_canon or cs_canon in js_canon:
-                found = True
-                break
-        if found:
-            matched_skills.append(js)
-        else:
-            missing_skills.append(js)
-            
+    cand_domains = profile.get("domains") or []
+    fit = get_fit(database, _build_llm(), candidate_id, profile, parsed_json, job_version_id, force=False)
+    matched_skills, missing_skills = reconcile_requirements(parsed_json, fit, cand_skills, cand_domains)
+
     # 4. Fetch/calculate fit evaluation
     run_row = database.fetchone(
         """
@@ -483,17 +512,24 @@ def get_candidate_job_profile(
     
     if run_row:
         fit_score = float(run_row[0])
-        fit_explanation = run_row[1] or ""
+        has_run = True
     else:
-        # Dynamically compute a fallback score
-        hard_skills_score = semantic_skill_match_score(cand_skills, job_skills_list)
-        soft_skills_score = compute_soft_skills_score(profile, parsed_json)
+        # No ranking run yet — compute a fallback fit_score from the LLM-judged fit.
+        hard_skills_score = fit["hard_skills"]
+        soft_skills_score = fit["soft_skills"]
         experience_score = compute_experience_score(profile, parsed_json)
-        domain_score = compute_domain_score(profile, parsed_json)
-        
-        fit_score = 0.4 * hard_skills_score + 0.3 * experience_score + 0.2 * domain_score + 0.1 * soft_skills_score
-        fit_explanation = "Rankings pipeline has not been run yet for this candidate. Run the AI Ranking Pipeline to generate a full explanation."
-        
+        domain_score = fit["domain_knowledge"]
+
+        if hard_skills_score < 15.0:
+            experience_score_gated = 0.0
+            domain_score_gated = 0.0
+        else:
+            experience_score_gated = experience_score
+            domain_score_gated = domain_score
+
+        fit_score = 0.4 * hard_skills_score + 0.15 * experience_score_gated + 0.1 * domain_score_gated + 0.35 * soft_skills_score
+        has_run = False
+
     # Classify fit level
     if fit_score >= 75:
         fit_level = "Good Fit"
@@ -508,7 +544,59 @@ def get_candidate_job_profile(
         years_exp = int(profile.get("years_experience") or 0)
     except:
         years_exp = 0
-        
+
+    # Build a clean, candidate-facing fit summary from structured signals (avoids
+    # surfacing the raw internal ranking explanation, which leaks decision/score artefacts).
+    first_name = (cand_name or "This candidate").split(" ")[0]
+    expl_parts = [f"{first_name} is a {fit_level.lower()} for {job_title}, with an overall match of {fit_score:.0f}%."]
+    if matched_skills:
+        expl_parts.append(f"Strengths align with the role on {', '.join(matched_skills[:5])}.")
+    if missing_skills:
+        expl_parts.append(f"Worth probing in the interview: {', '.join(missing_skills[:4])}.")
+    if years_exp:
+        expl_parts.append(f"Brings {years_exp} year{'s' if years_exp != 1 else ''} of experience.")
+    if not has_run:
+        expl_parts.append("Run the AI Ranking Pipeline for a full scored breakdown.")
+    fit_explanation = " ".join(expl_parts)
+
+    # 5. Semantic relevance: summarise the CV and the job, then explain how the two
+    #    relate. Each artefact is cached so repeat opens of the modal are cheap.
+    cv_summary = ""
+    job_summary = parsed_json.get("summary") or ""
+    semantic_summary = ""
+    semantic_relevant = False
+    try:
+        from services.summaries.generator import SummaryService
+        summarizer = SummaryService(_build_llm())
+
+        cv_summary = ensure_cv_summary(database, candidate_id, profile)
+
+        if not job_summary:
+            job_summary, job_used_llm = summarizer.summarize_job(parsed_json, "")
+            parsed_json["summary"] = job_summary
+            if job_used_llm:
+                database.execute(
+                    "UPDATE job_versions SET parsed_json = %s WHERE id = %s",
+                    [json.dumps(parsed_json), str(job_version_id)],
+                )
+
+        cached_rel = profile.get("semantic_summary") or ""
+        if cached_rel:
+            semantic_summary = cached_rel
+            semantic_relevant = bool(profile.get("semantic_relevant", False))
+        else:
+            rel = summarizer.relevance(cv_summary, job_summary)
+            semantic_summary = rel.get("summary", "")
+            semantic_relevant = bool(rel.get("relevant", False))
+            # Only cache real LLM relevance, so fallbacks self-heal next load.
+            if rel.get("used_llm"):
+                _update_latest_snapshot(database, candidate_id, {
+                    "semantic_summary": semantic_summary,
+                    "semantic_relevant": semantic_relevant,
+                })
+    except Exception:
+        logger.exception("Failed to generate semantic relevance for %s", candidate_id)
+
     return CandidateJobProfileResponse(
         candidate_id=candidate_id,
         candidate_name=cand_name,
@@ -525,5 +613,9 @@ def get_candidate_job_profile(
         missing_skills=missing_skills,
         fit_score=fit_score,
         fit_level=fit_level,
-        fit_explanation=fit_explanation
+        fit_explanation=fit_explanation,
+        cv_summary=cv_summary,
+        job_summary=job_summary,
+        semantic_summary=semantic_summary,
+        semantic_relevant=semantic_relevant,
     )

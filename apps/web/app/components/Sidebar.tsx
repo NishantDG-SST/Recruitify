@@ -2,9 +2,11 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { signOut, useSession } from 'next-auth/react';
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const { data: session } = useSession();
 
   return (
     <aside className="sidebar">
@@ -26,7 +28,7 @@ export default function Sidebar() {
           Settings
         </Link>
         
-        <Link href="#" className="nav-item" onClick={(e) => { e.preventDefault(); alert("Logout clicked"); }} style={{ display: 'flex', alignItems: 'center', gap: '12px', textDecoration: 'none' }}>
+        <Link href="#" className="nav-item" onClick={(e) => { e.preventDefault(); signOut({ callbackUrl: "/api/auth/signin" }); }} style={{ display: 'flex', alignItems: 'center', gap: '12px', textDecoration: 'none' }}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
             <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
             <polyline points="16 17 21 12 16 7"/>
@@ -54,8 +56,8 @@ export default function Sidebar() {
             </svg>
           </div>
           <div style={{ fontSize: '13px', lineHeight: '1.3' }}>
-            <strong style={{ color: '#ffffff' }}>Michael Smith</strong><br/>
-            <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.6)' }}>michaelsmith12@gmail.com</span>
+            <strong style={{ color: '#ffffff' }}>{session?.user?.name || 'Recruiter'}</strong><br/>
+            <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.6)' }}>{session?.user?.email || 'Not signed in'}</span>
           </div>
         </div>
       </div>
