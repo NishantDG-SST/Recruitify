@@ -15,6 +15,7 @@ from core.auth import SecurityContext, get_security_context
 from services.ranking.repository import RankingOutputRecord, RankingRepository
 from services.ranking.explanation import RankingExplanationService
 from services.llm.client import LLMClient, LLMConfig
+from services.scoring.llm_judge import score_fit, reconcile_requirements, _requirement_satisfied
 
 router = APIRouter(prefix="/jobs/{job_id}/rankings", tags=["rankings"])
 
@@ -52,138 +53,32 @@ def load_ranking_config(database) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Semantic skill matching helpers
-# ---------------------------------------------------------------------------
+def get_fit(database, llm, candidate_id, profile: dict, job_parsed: dict, job_version_id, force: bool = False) -> dict:
+    """Return the LLM-judged fit for a candidate against a job, cached per job_version_id.
 
-_SKILL_SYNONYMS: dict[str, set[str]] = {
-    "python": {"python3", "python2", "cpython", "python programming"},
-    "javascript": {"js", "ecmascript", "es6", "es2015", "vanilla js"},
-    "typescript": {"ts"},
-    "react": {"reactjs", "react.js", "react js"},
-    "angular": {"angularjs", "angular.js"},
-    "vue": {"vuejs", "vue.js"},
-    "node": {"nodejs", "node.js", "node js"},
-    "express": {"expressjs", "express.js"},
-    "nextjs": {"next.js", "next js", "next"},
-    "aws": {"amazon web services", "amazon aws", "cloud computing"},
-    "gcp": {"google cloud", "google cloud platform", "vertex ai", "bigquery", "gke"},
-    "azure": {"microsoft azure", "azure cloud"},
-    "docker": {"containerization", "containers"},
-    "kubernetes": {"k8s", "container orchestration"},
-    "terraform": {"infrastructure as code", "iac"},
-    "postgres": {"postgresql", "pg"},
-    "mysql": {"mariadb"},
-    "mongodb": {"mongo"},
-    "redis": {"caching"},
-    "kafka": {"apache kafka", "event streaming"},
-    "ci/cd": {"continuous integration", "continuous deployment", "cicd", "ci cd", "devops"},
-    "git": {"github", "gitlab", "version control", "source control"},
-    "machine learning": {"ml", "deep learning", "ai", "artificial intelligence"},
-    "rest": {"restful", "rest api", "restful api"},
-    "graphql": {"graph ql"},
-    "microservices": {"micro services", "microservice architecture"},
-    "agile": {"scrum", "kanban"},
-    "pandas": {"data analysis"},
-    "spark": {"apache spark", "pyspark"},
-    "java": {"jvm", "j2ee"},
-    "spring": {"spring boot", "spring framework", "springboot"},
-    "c++": {"cpp", "c plus plus"},
-    "c#": {"csharp", "c sharp", ".net", "dotnet"},
-    "ruby": {"ruby on rails", "rails", "ror"},
-    "go": {"golang"},
-    "rust": {"rustlang"},
-}
-
-# Build reverse lookup
-_SKILL_CANON: dict[str, str] = {}
-for _canon, _syns in _SKILL_SYNONYMS.items():
-    _SKILL_CANON[_canon] = _canon
-    for _s in _syns:
-        _SKILL_CANON[_s] = _canon
-
-
-def _canonicalize(skill: str) -> str:
-    s = skill.lower().strip()
-    return _SKILL_CANON.get(s, s)
-
-
-def _tokens(text: str) -> set[str]:
-    """Split a skill/phrase into whole-word tokens (keeps + and # for c++/c#)."""
-    return {t for t in re.split(r"[^a-z0-9+#]+", text.lower()) if t}
-
-
-def check_candidate_has_requirement(req: str, cand_skills: list[str], cand_domains: list[str], cand_raw_text: str = "") -> bool:
-    req_clean = req.lower().strip()
-
-    cand_skills_clean = [s.lower().strip() for s in cand_skills]
-    cand_skills_canon = {_canonicalize(s) for s in cand_skills_clean}
-    req_canon = _canonicalize(req_clean)
-
-    if req_canon in cand_skills_canon or req_clean in cand_skills_clean:
-        return True
-
-    # Token-based phrase containment: a requirement matches a skill only when one
-    # is a whole-word subset of the other (e.g. "java" ⊆ "core java", "spring" ⊆
-    # "spring boot"). This avoids substring false positives like "c" matching
-    # "microservices" or "java" matching "javascript".
-    req_tokens = _tokens(req_clean)
-    req_canon_tokens = _tokens(req_canon)
-    for cs in cand_skills_clean:
-        cs_tokens = _tokens(cs)
-        if req_tokens and (req_tokens <= cs_tokens or cs_tokens <= req_tokens):
-            return True
-        cs_canon_tokens = _tokens(_canonicalize(cs))
-        if req_canon_tokens and (req_canon_tokens <= cs_canon_tokens or cs_canon_tokens <= req_canon_tokens):
-            return True
-
-    cand_domains_clean = [d.lower().strip() for d in cand_domains]
-    domain_synonyms = {
-        "life sciences": {"life sciences", "life science", "biology", "biotech", "biotechnology", "pharmaceuticals", "pharma"},
-        "pharmaceutical industries": {"pharmaceuticals", "pharmaceutical", "pharma", "pharmaceutical industry", "pharmaceutical industries", "drug development", "life sciences"},
-        "pharmaceuticals": {"pharmaceuticals", "pharmaceutical", "pharma", "pharmaceutical industry", "pharmaceutical industries", "drug development", "life sciences"},
-        "contract research organization (cro)": {"contract research organization", "cro", "clinical trials", "clinical trial", "clinical research"},
-        "cro": {"contract research organization", "cro", "clinical trials", "clinical trial", "clinical research"},
-    }
-    
-    syns = domain_synonyms.get(req_clean, {req_clean})
-    for d in cand_domains_clean:
-        if d in syns:
-            return True
-        for syn in syns:
-            if syn in d or d in syn:
-                return True
-                
-    for d in cand_domains_clean:
-        if req_clean in d or d in req_clean:
-            return True
-
-    if cand_raw_text:
-        raw_lower = cand_raw_text.lower()
-        # Word-boundary match so "java" does not match "javascript" in resume text.
-        for term in {req_clean, *syns}:
-            if re.search(r"(?<![a-z0-9+#])" + re.escape(term) + r"(?![a-z0-9+#])", raw_lower):
-                return True
-
-    return False
-
-
-def semantic_skill_match_score(cand_skills: list[str], job_skills: list[str], cand_domains: list[str] = None) -> float:
-    """Compute semantic skill match percentage (0-100).
-    
-    Uses synonym mapping + substring matching as fallback + checks domains.
+    Cache lives in candidate_snapshots.profile_json.llm_fit, keyed by job_version_id so a
+    snapshot can be scored against multiple jobs without overwrite. generate_rankings passes
+    force=True; read paths (display/simulate/modal) reuse the cache → no LLM calls, deterministic.
     """
-    if not job_skills:
-        return 100.0
-    
-    cand_domains = cand_domains or []
-    matched = 0
-    
-    for js in job_skills:
-        if check_candidate_has_requirement(js, cand_skills, cand_domains):
-            matched += 1
-            
-    return (matched / len(job_skills)) * 100.0
+    key = str(job_version_id)
+    llm_fit = profile.get("llm_fit") or {}
+    if not force and key in llm_fit:
+        return llm_fit[key]
+
+    fit = score_fit(job_parsed, profile, llm)
+    llm_fit[key] = fit
+    profile["llm_fit"] = llm_fit  # keep the in-memory profile consistent
+
+    if candidate_id and database is not None and database.is_configured:
+        # Write the full merged map; the shallow `||` merge replaces the whole llm_fit key,
+        # so sibling jobs' entries (already in llm_fit) survive.
+        database.execute(
+            "UPDATE candidate_snapshots SET profile_json = profile_json || %s::jsonb "
+            "WHERE candidate_id = %s AND snapshot_version = "
+            "(SELECT MAX(snapshot_version) FROM candidate_snapshots WHERE candidate_id = %s)",
+            [json.dumps({"llm_fit": llm_fit}), candidate_id, candidate_id],
+        )
+    return fit
 
 
 def compute_experience_score(cand_profile: dict, job_parsed: dict) -> float:
@@ -222,98 +117,6 @@ def compute_experience_score(cand_profile: dict, job_parsed: dict) -> float:
         return 40.0
     else:
         return 20.0
-
-
-def compute_domain_score(cand_profile: dict, job_parsed: dict) -> float:
-    """Compute domain knowledge score (0-100).
-    
-    Uses domain overlap + keyword relevance from resume raw text.
-    """
-    raw_text = (cand_profile.get("raw_text") or "").lower()
-    cand_roles = [r.lower().strip() for r in (cand_profile.get("roles") or [])]
-        
-    job_domains = [d.lower().strip() for d in (job_parsed.get("domains") or [])]
-    if not job_domains:
-        # Fallback to software engineering domains if empty
-        job_domains = ["software engineering", "systems architecture", "backend engineering", "fullstack development"]
-    
-    domain_keywords: dict[str, list[str]] = {
-        "fintech": ["fintech", "financial", "banking", "payments", "trading", "finance", "investment"],
-        "healthcare": ["healthcare", "medical", "health", "clinical", "hospital", "patient", "life sciences", "pharmaceuticals", "pharma", "cro", "clinical trial"],
-        "medical services": ["medical services", "medical", "healthcare", "clinical", "hospital", "patient", "life sciences", "pharmaceuticals", "pharma", "cro", "clinical trial"],
-        "hospital": ["hospital", "medical", "healthcare", "clinical", "patient"],
-        "e-commerce": ["ecommerce", "e-commerce", "retail", "marketplace", "shopping", "commerce"],
-        "saas": ["saas", "software as a service", "platform", "b2b", "subscription"],
-        "edtech": ["edtech", "education", "learning", "academic"],
-        "cybersecurity": ["security", "cybersecurity", "infosec", "vulnerability"],
-        "logistics": ["logistics", "supply chain", "warehouse", "shipping"],
-        "media": ["media", "content", "publishing", "streaming"],
-        "gaming": ["gaming", "game", "esports"],
-        "banking": ["banking", "bank", "financial services"],
-        "insurance": ["insurance", "insurtech"],
-        "telecom": ["telecom", "telecommunications"],
-        "energy": ["energy", "oil", "renewable"],
-        "automotive": ["automotive", "vehicle", "autonomous"],
-        "travel": ["travel", "hospitality", "tourism"],
-        "platform engineering": ["platform", "infrastructure", "devops", "sre", "reliability"],
-        "high scale": ["scale", "high scale", "distributed", "performance", "scalability", "millions"],
-        "software engineering": ["software engineer", "developer", "programming", "software development", "computer science", "coding"],
-        "systems architecture": ["system architecture", "scalability", "distributed system", "microservices"],
-        "backend engineering": ["backend", "api", "database", "sql", "server"],
-        "fullstack development": ["fullstack", "frontend", "backend", "web development", "react", "node"],
-    }
-    
-    cand_domains = [d.lower().strip() for d in (cand_profile.get("domains") or [])]
-    
-    matched = 0
-    for jd in job_domains:
-        # Direct match
-        if jd in cand_domains:
-            matched += 1
-            continue
-        
-        # Keyword-based relevance from raw text and roles
-        keywords = domain_keywords.get(jd, [jd])
-        found = False
-        for kw in keywords:
-            if kw in raw_text or any(kw in role for role in cand_roles):
-                found = True
-                break
-        if found:
-            matched += 1
-            
-    score = (matched / len(job_domains)) * 100.0
-    return score
-
-
-def compute_soft_skills_score(cand_profile: dict, job_parsed: dict) -> float:
-    """Compute soft skills match score (0-100).
-    
-    Uses direct matching + inference from resume action verbs/phrases.
-    """
-    raw_text = (cand_profile.get("raw_text") or "").lower()
-    cand_soft = {s.lower().strip() for s in (cand_profile.get("soft_skills") or [])}
-
-    leadership_signals =["led team", "managed team", "team lead", "head of", "director of", "vp of", "chief", "founded", "built team", "leadership", "manager", "lead engineer", "management"]
-    mentoring_signals = ["mentored", "coached", "trained", "onboarded", "junior developers", "interns", "mentorship", "mentoring"]
-    
-    has_leadership = any(sig in raw_text for sig in leadership_signals) or "leadership" in cand_soft
-    has_mentoring = any(sig in raw_text for sig in mentoring_signals) or "mentoring" in cand_soft
-    
-    if not (has_leadership or has_mentoring):
-        return 0.0
-        
-    score = 0.0
-    if has_leadership:
-        score += 50.0
-    if has_mentoring:
-        score += 50.0
-        
-    other_soft = cand_soft - {"leadership", "mentoring"}
-    if other_soft:
-        score = min(100.0, score + len(other_soft) * 5.0)
-        
-    return score
 
 
 def get_cached_explanation(database, job_version_id: str, snapshot_id: str) -> str | None:
@@ -386,13 +189,12 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
         repo = RankingRepository(database)
         run_outputs = repo.list_outputs(latest_run_id)
         if run_outputs:
-            run_snapshots = {str(o.candidate_snapshot_id) for o in run_outputs}
             current_snapshots_str = {str(sid) for sid in current_snapshots}
-            # Reuse the cached run as long as it covers every current candidate.
-            # The run may also contain candidates that have since been removed; those
-            # are filtered out below. Only NEW candidates (present now but not in the
-            # run) make the run stale and require regeneration.
-            if current_snapshots_str and current_snapshots_str <= run_snapshots:
+            # Render the latest run intersected with the CURRENT roster: candidates removed
+            # since the run are filtered out; candidates added since (not yet scored) simply
+            # don't appear until the post-upload incremental run includes them. The ranking is
+            # never blanked just because a new candidate was added.
+            if current_snapshots_str:
                 ranked_candidates = []
                 sorted_outputs = sorted(run_outputs, key=lambda x: x.rank)
                 for o in sorted_outputs:
@@ -415,11 +217,12 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
 
                     cand_name = profile_json.get("name", "Unknown Candidate")
 
-                    # Compute category scores
-                    hard_skills_score = semantic_skill_match_score(profile_json.get("skills", []), job_skills_list, profile_json.get("domains", []))
-                    soft_skills_score = compute_soft_skills_score(profile_json, parsed_json)
+                    # Category scores from the cached LLM-judged fit (read-only; no LLM call)
+                    fit = get_fit(database, None, cand_id, profile_json, parsed_json, job_version_id, force=False)
+                    hard_skills_score = fit["hard_skills"]
+                    soft_skills_score = fit["soft_skills"]
                     experience_score = compute_experience_score(profile_json, parsed_json)
-                    domain_score = compute_domain_score(profile_json, parsed_json)
+                    domain_score = fit["domain_knowledge"]
 
                     ranked_candidates.append(
                         RankingCandidate(
@@ -437,8 +240,9 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
                             status=cand_status,
                         )
                     )
-                logger.info("Returning cached ranking run %s from database", latest_run_id)
-                return RankingResponse(run_id=str(latest_run_id), candidates=ranked_candidates)
+                if ranked_candidates:
+                    logger.info("Returning ranking run %s (%d of %d run outputs still current)", latest_run_id, len(ranked_candidates), len(run_outputs))
+                    return RankingResponse(run_id=str(latest_run_id), candidates=ranked_candidates)
 
     # If no cached run exists or it doesn't match the current candidate set, return empty list
     logger.info("No matching cached ranking run found for job version %s", job_version_id)
@@ -447,6 +251,17 @@ def get_rankings(job_id: str, security: SecurityContext = Depends(get_security_c
 
 @router.post("", response_model=RankingResponse)
 def generate_rankings(job_id: str, security: SecurityContext = Depends(get_security_context)) -> RankingResponse:
+    """Explicit (re)ranking via the Recalculate button — re-judges every candidate (force=True)."""
+    return run_ranking(job_id, security, force=True)
+
+
+def run_ranking(job_id: str, security: SecurityContext, force: bool = True) -> RankingResponse:
+    """Score the current roster for a job and persist a ranking run.
+
+    force=True re-judges every candidate (explicit Recalculate, e.g. after a job edit or a
+    model change). force=False reuses cached per-candidate fits and only judges candidates
+    not yet scored — the cheap incremental run triggered in the background after an upload.
+    """
     import os
     import logging
     logger = logging.getLogger(__name__)
@@ -505,7 +320,14 @@ def generate_rankings(job_id: str, security: SecurityContext = Depends(get_secur
         embedding_dimensions=settings.embedding_dimensions,
     ))
     explainer = RankingExplanationService(llm)
-    
+    # Dedicated temperature-0 client for the fit judge (stable, deterministic scores)
+    judge_llm = LLMClient(LLMConfig(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
+        model=settings.llm_model,
+        temperature=0.0,
+    ))
+
     # Generate job embedding dynamically
     job_embedding_vector = [0.0] * 768
     try:
@@ -558,9 +380,14 @@ def generate_rankings(job_id: str, security: SecurityContext = Depends(get_secur
             "education": 1.0
         }
         
-        # Include individual must-haves in features
+        # LLM-judged fit (fresh per run, cached per job_version_id)
+        fit = get_fit(database, judge_llm, cand_id, profile, parsed_json, job_version_id, force=force)
+        cand_skills_list = profile.get("skills", [])
+        cand_domains_list = profile.get("domains", [])
+
+        # Include individual must-haves in features (3-way reconciliation, robust to drift/omission)
         for mh in must_have_skills:
-            cand_score_features[mh] = 1.0 if check_candidate_has_requirement(mh, profile.get("skills", []), profile.get("domains", []), profile.get("raw_text", "")) else 0.0
+            cand_score_features[mh] = 1.0 if _requirement_satisfied(mh, fit["matched_skills"], fit["missing_skills"], cand_skills_list, cand_domains_list) else 0.0
             job_score_features[mh] = 1.0
         
         # Fetch candidate embedding from DB
@@ -576,11 +403,11 @@ def generate_rankings(job_id: str, security: SecurityContext = Depends(get_secur
             cand_embedding_vector = val
             logger.info("Loaded real embedding for candidate snapshot %s", snap_id)
 
-        # Calculate consistent category scores
-        hard_skills_score = semantic_skill_match_score(profile.get("skills", []), job_skills_list, profile.get("domains", []))
-        soft_skills_score = compute_soft_skills_score(profile, parsed_json)
+        # Category scores: skills/soft/domain from the LLM judge, experience deterministic
+        hard_skills_score = fit["hard_skills"]
+        soft_skills_score = fit["soft_skills"]
         experience_score = compute_experience_score(profile, parsed_json)
-        domain_score = compute_domain_score(profile, parsed_json)
+        domain_score = fit["domain_knowledge"]
 
         name_lower = cand_name.lower()
 
@@ -808,11 +635,11 @@ def simulate_ranking(
                 except Exception:
                     profile_json = {}
 
-            job_skills_list = (parsed_json.get("must_have_skills") or []) + (parsed_json.get("nice_to_have_skills") or [])
-            hard_skills_score = semantic_skill_match_score(profile_json.get("skills", []), job_skills_list, profile_json.get("domains", []))
-            soft_skills_score = compute_soft_skills_score(profile_json, parsed_json)
+            fit = get_fit(database, llm, candidate.candidate_id, profile_json, parsed_json, job_version_id, force=False)
+            hard_skills_score = fit["hard_skills"]
+            soft_skills_score = fit["soft_skills"]
             experience_score = compute_experience_score(profile_json, parsed_json)
-            domain_score = compute_domain_score(profile_json, parsed_json)
+            domain_score = fit["domain_knowledge"]
 
             match_result = matcher.match(
                 MatchInput(
@@ -1002,10 +829,11 @@ def simulate_ranking(
                 "education": 1.0
             }
             
+            fit = get_fit(database, llm, cand_id, profile_json, parsed_json, job_version_id, force=False)
             for mh in must_have_skills:
-                cand_score_features[mh] = 1.0 if check_candidate_has_requirement(mh, profile_json.get("skills", []), profile_json.get("domains", []), profile_json.get("raw_text", "")) else 0.0
+                cand_score_features[mh] = 1.0 if _requirement_satisfied(mh, fit["matched_skills"], fit["missing_skills"], profile_json.get("skills", []), profile_json.get("domains", [])) else 0.0
                 job_score_features[mh] = 1.0
-            
+
             cand_embedding_vector = [0.0] * 768
             emb_row = database.fetchone(
                 "SELECT embedding FROM candidate_embeddings WHERE candidate_snapshot_id = %s",
@@ -1018,10 +846,10 @@ def simulate_ranking(
                 cand_embedding_vector = val
 
             job_skills_list = (parsed_json.get("must_have_skills") or []) + (parsed_json.get("nice_to_have_skills") or [])
-            hard_skills_score = semantic_skill_match_score(profile_json.get("skills", []), job_skills_list, profile_json.get("domains", []))
-            soft_skills_score = compute_soft_skills_score(profile_json, parsed_json)
+            hard_skills_score = fit["hard_skills"]
+            soft_skills_score = fit["soft_skills"]
             experience_score = compute_experience_score(profile_json, parsed_json)
-            domain_score = compute_domain_score(profile_json, parsed_json)
+            domain_score = fit["domain_knowledge"]
 
             match_result = matcher.match(
                 MatchInput(

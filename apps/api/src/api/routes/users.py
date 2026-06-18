@@ -1,15 +1,47 @@
 import hashlib
 import hmac
 import os
+import time
 import uuid
+from collections import defaultdict, deque
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from core.config import settings
 from core.database import get_database
 
 router = APIRouter(prefix="/users", tags=["users"])
+
+
+# ---------------------------------------------------------------------------
+# Lightweight in-memory rate limiting for the auth endpoints (no extra deps).
+# Single-instance scope — fine for the current deployment; use a shared store
+# (e.g. Redis) if the api is ever scaled to multiple instances.
+# ---------------------------------------------------------------------------
+
+_RATE_LIMIT = 10          # max attempts...
+_RATE_WINDOW = 60.0       # ...per this many seconds, per IP + bucket
+_attempts: dict[str, deque] = defaultdict(deque)
+
+
+def _client_ip(request: Request) -> str:
+    # Behind the Vercel/Render proxies the real client is in X-Forwarded-For.
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _rate_limit(request: Request, bucket: str) -> None:
+    key = f"{bucket}:{_client_ip(request)}"
+    now = time.monotonic()
+    dq = _attempts[key]
+    while dq and now - dq[0] > _RATE_WINDOW:
+        dq.popleft()
+    if len(dq) >= _RATE_LIMIT:
+        raise HTTPException(status_code=429, detail="Too many attempts. Please wait a minute and try again.")
+    dq.append(now)
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +91,8 @@ class AuthResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.post("/register", response_model=AuthResponse, status_code=201)
-def register_user(payload: RegisterRequest) -> AuthResponse:
+def register_user(payload: RegisterRequest, request: Request) -> AuthResponse:
+    _rate_limit(request, "register")
     database = get_database(settings.database_dsn)
 
     email = payload.email.strip().lower()
@@ -90,7 +123,8 @@ def register_user(payload: RegisterRequest) -> AuthResponse:
 
 
 @router.post("/login", response_model=AuthResponse)
-def login_user(payload: LoginRequest) -> AuthResponse:
+def login_user(payload: LoginRequest, request: Request) -> AuthResponse:
+    _rate_limit(request, "login")
     database = get_database(settings.database_dsn)
     email = payload.email.strip().lower()
 

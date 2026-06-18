@@ -1,9 +1,37 @@
-from fastapi import FastAPI
+import os
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from api.routes import candidates, health, jobs, rankings, users, interviews
 from core.config import settings
 
-app = FastAPI(title=settings.api_title, version=settings.api_version)
+_is_prod = settings.env == "production"
+app = FastAPI(
+    title=settings.api_title,
+    version=settings.api_version,
+    # Interactive API docs / schema are disabled in production.
+    docs_url=None if _is_prod else "/docs",
+    redoc_url=None if _is_prod else "/redoc",
+    openapi_url=None if _is_prod else "/openapi.json",
+)
+
+
+@app.middleware("http")
+async def require_internal_token(request: Request, call_next):
+    """Only accept traffic from the trusted web tier in production.
+
+    When INTERNAL_API_TOKEN is set, every request must carry a matching
+    `x-internal-token` header (the Next.js proxy injects it). `/health` is
+    exempt so the platform's health checks work. When the env var is unset
+    (local dev), this guard is a no-op.
+    """
+    expected = os.getenv("INTERNAL_API_TOKEN", "")
+    if expected and request.url.path != "/health":
+        if request.headers.get("x-internal-token") != expected:
+            return JSONResponse({"detail": "Forbidden"}, status_code=403)
+    return await call_next(request)
+
 
 app.include_router(health.router)
 app.include_router(jobs.router)

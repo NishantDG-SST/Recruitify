@@ -21,14 +21,8 @@ from services.features.extraction import ExtractionService
 from services.llm.client import LLMClient, LLMConfig
 from services.taxonomy.normalizer import TaxonomyNormalizer
 from services.interviews.generator import InterviewGenerator
-from api.routes.rankings import (
-    semantic_skill_match_score,
-    compute_soft_skills_score,
-    compute_domain_score,
-    compute_experience_score,
-    _canonicalize,
-    check_candidate_has_requirement,
-)
+from api.routes.rankings import compute_experience_score, get_fit
+from services.scoring.llm_judge import reconcile_requirements
 
 router = APIRouter(prefix="/jobs/{job_id}/candidates", tags=["candidates"])
 logger = logging.getLogger(__name__)
@@ -41,6 +35,9 @@ def process_candidates_batch_background(
     settings_llm_base_url: str,
     settings_llm_model: str,
     settings_embedding_model: str,
+    job_id: str,
+    org_id: str,
+    user_id: str,
 ):
     from core.database import get_database
     from services.llm.client import LLMClient, LLMConfig
@@ -127,6 +124,19 @@ def process_candidates_batch_background(
             except Exception as db_err:
                 logger.error("Failed to mark candidate status as failed for %s: %s", candidate_id, db_err)
 
+    # All candidates in the batch are extracted + embedded. Refresh the job's ranking
+    # incrementally: run_ranking(force=False) reuses cached per-candidate fits and only
+    # judges the newly added candidates, then rewrites the run so they appear in the
+    # ranking without the user clicking Recalculate.
+    if job_id and org_id:
+        try:
+            from api.routes.rankings import run_ranking
+            from core.auth import SecurityContext
+            run_ranking(job_id, SecurityContext(org_id=org_id, user_id=user_id), force=False)
+            logger.info("Incremental ranking refreshed for job %s after upload batch", job_id)
+        except Exception as rank_err:
+            logger.warning("Incremental ranking after upload failed for job %s: %s", job_id, rank_err)
+
 
 @router.post("", response_model=CandidateUploadResponse, status_code=status.HTTP_202_ACCEPTED)
 def upload_candidates(
@@ -187,6 +197,9 @@ def upload_candidates(
         settings_llm_base_url=settings.llm_base_url,
         settings_llm_model=settings.llm_model,
         settings_embedding_model=settings.embedding_model,
+        job_id=job_id,
+        org_id=security.org_id,
+        user_id=security.user_id,
     )
 
     return CandidateUploadResponse(batch_id=batch_id)
@@ -255,9 +268,10 @@ def get_candidate_detail(
             target_job_id = None
 
     job_requirements = {}
+    job_version_id = None
     if target_job_id:
         job_row = database.fetchone(
-            "SELECT parsed_json FROM job_versions jv JOIN jobs j ON jv.job_id = j.id WHERE jv.job_id = %s AND j.org_id = %s ORDER BY jv.version DESC LIMIT 1",
+            "SELECT parsed_json, jv.id FROM job_versions jv JOIN jobs j ON jv.job_id = j.id WHERE jv.job_id = %s AND j.org_id = %s ORDER BY jv.version DESC LIMIT 1",
             [target_job_id, security.org_id]
         )
         if job_row and job_row[0]:
@@ -267,14 +281,17 @@ def get_candidate_detail(
                     job_requirements = json.loads(job_requirements)
                 except json.JSONDecodeError:
                     job_requirements = {}
+            job_version_id = job_row[1]
 
-    job_skills_list = (job_requirements.get("must_have_skills") or []) + (job_requirements.get("nice_to_have_skills") or [])
-    hard_skills_score = semantic_skill_match_score(profile.get("skills", []), job_skills_list, profile.get("domains", []))
-    soft_skills_score = compute_soft_skills_score(profile, job_requirements)
-
+    # Category scores from the LLM-judged fit (cached per job_version_id); experience is deterministic.
+    if job_version_id:
+        fit = get_fit(database, _build_llm(), candidate_id, profile, job_requirements, job_version_id, force=False)
+        hard_skills_score = fit["hard_skills"]
+        soft_skills_score = fit["soft_skills"]
+        domain_score = fit["domain_knowledge"]
+    else:
+        hard_skills_score = soft_skills_score = domain_score = 0.0
     experience_score = compute_experience_score(profile, job_requirements)
-
-    domain_score = compute_domain_score(profile, job_requirements)
 
     name_lower = (profile.get("name") or "").lower()
 
@@ -474,25 +491,12 @@ def get_candidate_job_profile(
         except json.JSONDecodeError:
             parsed_json = {}
             
-    # 3. Calculate matched & missing skills
-    must_have = parsed_json.get("must_have_skills") or []
-    nice_to_have = parsed_json.get("nice_to_have_skills") or []
-    job_skills_list = must_have + nice_to_have
-    
+    # 3. LLM-judged fit (cached per job_version_id), reconciled onto the job's wording
     cand_skills = profile.get("skills") or []
-    
-    matched_skills = []
-    missing_skills = []
-    
-    # Match strictly against extracted skills/domains (no raw_text fallback) so the
-    # matched/missing lists reflect what parsing actually extracted and stay consistent
-    # with the Hard Skills score.
-    for js in job_skills_list:
-        if check_candidate_has_requirement(js, cand_skills, profile.get("domains") or []):
-            matched_skills.append(js)
-        else:
-            missing_skills.append(js)
-            
+    cand_domains = profile.get("domains") or []
+    fit = get_fit(database, _build_llm(), candidate_id, profile, parsed_json, job_version_id, force=False)
+    matched_skills, missing_skills = reconcile_requirements(parsed_json, fit, cand_skills, cand_domains)
+
     # 4. Fetch/calculate fit evaluation
     run_row = database.fetchone(
         """
@@ -510,11 +514,11 @@ def get_candidate_job_profile(
         fit_score = float(run_row[0])
         has_run = True
     else:
-        # Dynamically compute a fallback score
-        hard_skills_score = semantic_skill_match_score(cand_skills, job_skills_list, profile.get("domains", []))
-        soft_skills_score = compute_soft_skills_score(profile, parsed_json)
+        # No ranking run yet — compute a fallback fit_score from the LLM-judged fit.
+        hard_skills_score = fit["hard_skills"]
+        soft_skills_score = fit["soft_skills"]
         experience_score = compute_experience_score(profile, parsed_json)
-        domain_score = compute_domain_score(profile, parsed_json)
+        domain_score = fit["domain_knowledge"]
 
         if hard_skills_score < 15.0:
             experience_score_gated = 0.0

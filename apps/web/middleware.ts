@@ -11,6 +11,7 @@ const PUBLIC_API = ["/api/users/register", "/api/users/login"];
 export async function middleware(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
   const backend = process.env.INTERNAL_API_URL || "http://127.0.0.1:8000";
+  const internalToken = process.env.INTERNAL_API_TOKEN || "";
 
   // NextAuth's own endpoints (callbacks, session) must pass through.
   if (pathname.startsWith("/api/auth")) {
@@ -19,7 +20,9 @@ export async function middleware(request: NextRequest) {
 
   // Public API (signup/login) → proxy to backend without requiring a session.
   if (PUBLIC_API.includes(pathname)) {
-    return NextResponse.rewrite(new URL(pathname.replace(/^\/api/, "") + search, backend));
+    const headers = new Headers(request.headers);
+    headers.set("x-internal-token", internalToken);
+    return NextResponse.rewrite(new URL(pathname.replace(/^\/api/, "") + search, backend), { request: { headers } });
   }
 
   const token = await getToken({ req: request, secret: process.env.NEXTAUTH_SECRET });
@@ -32,6 +35,7 @@ export async function middleware(request: NextRequest) {
     const headers = new Headers(request.headers);
     headers.set("x-user-id", (token.id as string) || DEMO_USER);
     headers.set("x-org-id", (token.org_id as string) || DEMO_ORG);
+    headers.set("x-internal-token", internalToken);
 
     const destinationUrl = new URL(pathname.replace(/^\/api/, "") + search, backend);
     return NextResponse.rewrite(destinationUrl, { request: { headers } });
