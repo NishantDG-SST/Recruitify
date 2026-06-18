@@ -27,3 +27,16 @@ class InterviewRoundResponse(BaseModel):
 
 class InterviewListResponse(BaseModel):
     interviews: list[InterviewRoundResponse]
+
+
+class InterviewCandidate(BaseModel):
+    candidate_id: str
+    name: str
+    role: str
+    status: str
+    fit_score: Optional[float] = None
+    questions: list = []
+
+
+class InterviewBoardResponse(BaseModel):
+    candidates: list[InterviewCandidate]

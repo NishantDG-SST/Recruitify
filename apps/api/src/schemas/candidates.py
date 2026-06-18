@@ -33,3 +33,7 @@ class CandidateJobProfileResponse(BaseModel):
     fit_score: float
     fit_level: str
     fit_explanation: str
+    cv_summary: str = ""
+    job_summary: str = ""
+    semantic_summary: str = ""
+    semantic_relevant: bool = False

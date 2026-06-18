@@ -10,11 +10,67 @@ from schemas.interviews import (
     RoundUpdateRequest,
     CandidateStatusUpdateRequest,
     InterviewRoundResponse,
-    InterviewListResponse
+    InterviewListResponse,
+    InterviewCandidate,
+    InterviewBoardResponse,
 )
 
 router = APIRouter(prefix="/jobs/{job_id}", tags=["interviews"])
 logger = logging.getLogger(__name__)
+
+
+@router.get("/interview-candidates", response_model=InterviewBoardResponse)
+def list_interview_candidates(
+    job_id: str,
+    security: SecurityContext = Depends(get_security_context)
+) -> InterviewBoardResponse:
+    """Candidates in the interview pipeline for a job, grouped by status on the client.
+
+    Includes anyone who has been moved to interview as well as those already
+    decided (selected/rejected) so they show under the respective board tabs.
+    """
+    database = get_database(settings.database_dsn)
+
+    job_row = database.fetchone("SELECT id FROM jobs WHERE id = %s AND org_id = %s", [job_id, security.org_id])
+    if not job_row:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    rows = database.fetchall(
+        """
+        SELECT c.id,
+               c.status,
+               s.profile_json->>'name',
+               s.profile_json->>'current_role',
+               s.profile_json->'interview_questions'
+        FROM candidates c
+        JOIN candidate_snapshots s ON c.id = s.candidate_id
+        WHERE c.org_id = %s
+          AND s.profile_json->>'job_id' = %s
+          AND c.status IN ('interview', 'interviewing', 'selected', 'rejected')
+          AND s.snapshot_version = (SELECT max(snapshot_version) FROM candidate_snapshots WHERE candidate_id = c.id)
+        ORDER BY s.profile_json->>'name'
+        """,
+        [security.org_id, job_id]
+    )
+
+    candidates = []
+    for r in rows:
+        questions = r[4]
+        if isinstance(questions, str):
+            try:
+                questions = json.loads(questions)
+            except json.JSONDecodeError:
+                questions = []
+        candidates.append(
+            InterviewCandidate(
+                candidate_id=str(r[0]),
+                status=r[1],
+                name=r[2] or "Unknown Candidate",
+                role=r[3] or "Candidate",
+                questions=questions or [],
+            )
+        )
+    return InterviewBoardResponse(candidates=candidates)
 
 @router.get("/interviews", response_model=InterviewListResponse)
 def list_interviews(

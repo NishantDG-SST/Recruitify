@@ -30,6 +30,7 @@ class RankingCandidate(BaseModel):
     rank: int
     explanation_text: str | None = None
     category_scores: dict | None = None
+    status: str | None = None
 
 
 class RankingResponse(BaseModel):

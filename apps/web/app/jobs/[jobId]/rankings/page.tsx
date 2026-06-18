@@ -3,12 +3,13 @@
 import { useEffect, useState } from "react";
 import { fetchRankings, generateRankings, createOverride, generateInterview, fetchBiasAnalysis, simulateRankings, updateCandidateStatus, scheduleInterviewRound, fetchCandidateJobProfile } from "../../../lib/api";
 
-type Candidate = { 
-  candidate_id: string; 
-  candidate_name?: string; 
-  score: number; 
-  rank: number; 
+type Candidate = {
+  candidate_id: string;
+  candidate_name?: string;
+  score: number;
+  rank: number;
   explanation_text?: string;
+  status?: string;
   category_scores?: {
     hard_skills?: number;
     soft_skills?: number;
@@ -237,26 +238,25 @@ export default function RankingsPage({ params }: { params: { jobId: string } }) 
         </div>
       ) : (
         <>
-          <div className="stats-grid">
-            <div className="stat-card purple">
-              <div className="stat-title">Candidates Processed</div>
-              <div className="stat-value">{candidates.length > 0 ? candidates.length : '...'}</div>
-              <div className="stat-trend">↑ 12% vs last run</div>
-            </div>
-            <div className="stat-card orange">
-              <div className="stat-title">Avg. Match Score</div>
-              <div className="stat-value">{candidates.length > 0 ? (candidates.reduce((a, b) => a + b.score, 0) / candidates.length).toFixed(1) : '...'}</div>
-              <div className="stat-trend">Top 10% quality</div>
-            </div>
-            <div className="stat-card pink">
-              <div className="stat-title">Must-Haves Met</div>
-              <div className="stat-value">94%</div>
-              <div className="stat-trend">High alignment</div>
-            </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 20, marginBottom: 24 }}>
+            {[
+              { label: "Candidates Processed", icon: "👥", value: candidates.length > 0 ? candidates.length : '...', trend: "In this ranking run", bg: "linear-gradient(135deg, #b388ff, #d3b4f6)", color: "#2a1a4a" },
+              { label: "Avg. Match Score", icon: "🎯", value: candidates.length > 0 ? (candidates.reduce((a, b) => a + b.score, 0) / candidates.length).toFixed(1) : '...', trend: "Across all candidates", bg: "linear-gradient(135deg, #ff7d29, #ffb87a)", color: "#5a2c00" },
+              { label: "Top Match", icon: "🏆", value: candidates.length > 0 ? `${candidates[0].score.toFixed(0)}%` : '...', trend: candidates.length > 0 ? (candidates[0].candidate_name || "—") : "—", bg: "linear-gradient(135deg, #38b06f, #8fe3ad)", color: "#0d3d24" },
+            ].map((card) => (
+              <div key={card.label} className="stat-card" style={{ background: card.bg, color: card.color, minHeight: 160, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                <div className="stat-title" style={{ color: card.color, display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ width: 38, height: 38, borderRadius: '50%', background: 'rgba(255,255,255,0.35)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>{card.icon}</span>
+                  {card.label}
+                </div>
+                <div className="stat-value" style={{ margin: '10px 0 6px' }}>{card.value}</div>
+                <div className="stat-trend" style={{ background: 'rgba(255,255,255,0.45)', color: card.color, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{card.trend}</div>
+              </div>
+            ))}
           </div>
 
-          <div className="content-grid">
-            {/* Left Column Stack */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+            {/* Full-width stack */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
               {/* AI Weight Calibration (Simulation) Panel */}
               <div className="panel light-orange">
@@ -324,7 +324,7 @@ export default function RankingsPage({ params }: { params: { jobId: string } }) 
                       if (idx === 0) {
                         return {
                           cardClass: "rank-card-0",
-                          avatarBg: "linear-gradient(135deg, #38120b, #612216)",
+                          avatarBg: "linear-gradient(135deg, #f6a700, #ffd966)",
                           buttonBg: "#38120b",
                           buttonHoverBg: "#ff7d29",
                           buttonColor: "#ffffff"
@@ -332,16 +332,16 @@ export default function RankingsPage({ params }: { params: { jobId: string } }) 
                       } else if (idx === 1) {
                         return {
                           cardClass: "rank-card-1",
-                          avatarBg: "linear-gradient(135deg, #ff7d29, #ff9b44)",
-                          buttonBg: "#ff9b44",
+                          avatarBg: "linear-gradient(135deg, #8a99ad, #cdd6e3)",
+                          buttonBg: "#5a6b80",
                           buttonHoverBg: "#38120b",
                           buttonColor: "#ffffff"
                         };
                       } else if (idx === 2) {
                         return {
                           cardClass: "rank-card-2",
-                          avatarBg: "linear-gradient(135deg, #ff9b44, #ffb87a)",
-                          buttonBg: "#ff7d29",
+                          avatarBg: "linear-gradient(135deg, #c46200, #ff9b54)",
+                          buttonBg: "#c46200",
                           buttonHoverBg: "#ff9b44",
                           buttonColor: "#ffffff"
                         };
@@ -416,7 +416,7 @@ export default function RankingsPage({ params }: { params: { jobId: string } }) 
                           
                           <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
                             <span style={{ fontSize: '11px', background: '#38120b', color: '#fff', padding: '2px 8px', borderRadius: '12px', fontWeight: 800 }}>
-                              Rank #{candidate.rank}
+                              {index === 0 ? '🥇 ' : index === 1 ? '🥈 ' : index === 2 ? '🥉 ' : ''}Rank #{candidate.rank}
                             </span>
                             <span style={{
                               fontSize: '11px',
@@ -429,24 +429,8 @@ export default function RankingsPage({ params }: { params: { jobId: string } }) 
                               {candidate.score.toFixed(0)}% Match
                             </span>
                           </div>
-
-                          {candidate.explanation_text && (
-                            <div className="ranking-desc" style={{ 
-                              fontSize: '12.5px', 
-                              color: '#555', 
-                              lineHeight: '1.4', 
-                              fontStyle: 'italic',
-                              marginTop: '2px',
-                              display: '-webkit-box',
-                              WebkitLineClamp: 2,
-                              WebkitBoxOrient: 'vertical',
-                              overflow: 'hidden'
-                            }}>
-                              "{candidate.explanation_text}"
-                            </div>
-                          )}
                         </div>
-                        
+
                         {/* Score Breakdown Progress Bars Column */}
                         <div style={{ flex: 1, display: 'flex', justifyContent: 'center' }}>
                           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 12px', width: '100%', maxWidth: '300px', background: 'rgba(255,255,255,0.4)', padding: '10px 12px', borderRadius: '12px', border: '1px solid rgba(0,0,0,0.04)' }}>
@@ -477,27 +461,33 @@ export default function RankingsPage({ params }: { params: { jobId: string } }) 
 
                         {/* Actions Column */}
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', width: '130px', alignItems: 'stretch', justifyContent: 'center', flexShrink: 0 }}>
-                          <button 
-                            className="pill-button" 
-                            onClick={() => handleMoveToInterview(candidate.candidate_id)}
-                            disabled={movedCandidates[candidate.candidate_id]}
-                            style={{ 
-                              background: movedCandidates[candidate.candidate_id] ? '#2d6a4f' : styles.buttonBg, 
-                              color: '#ffffff',
-                              padding: '10px 16px',
-                              fontSize: '12px',
-                              fontWeight: 800,
-                              border: 'none',
-                              borderRadius: '30px',
-                              cursor: movedCandidates[candidate.candidate_id] ? 'default' : 'pointer',
-                              boxShadow: movedCandidates[candidate.candidate_id] ? 'none' : '0 4px 10px rgba(0,0,0,0.05)',
-                              transition: 'all 0.2s ease',
-                              width: '100%',
-                              textAlign: 'center'
-                            }}
-                          >
-                            {movedCandidates[candidate.candidate_id] ? "✓ Interviewing" : "Interview"}
-                          </button>
+                          {(() => {
+                            const inInterview = movedCandidates[candidate.candidate_id]
+                              || ["interview", "interviewing", "selected", "rejected"].includes(candidate.status || "");
+                            return (
+                              <button
+                                className="pill-button"
+                                onClick={() => handleMoveToInterview(candidate.candidate_id)}
+                                disabled={inInterview}
+                                style={{
+                                  background: inInterview ? '#2d6a4f' : styles.buttonBg,
+                                  color: '#ffffff',
+                                  padding: '10px 16px',
+                                  fontSize: '12px',
+                                  fontWeight: 800,
+                                  border: 'none',
+                                  borderRadius: '30px',
+                                  cursor: inInterview ? 'default' : 'pointer',
+                                  boxShadow: inInterview ? 'none' : '0 4px 10px rgba(0,0,0,0.05)',
+                                  transition: 'all 0.2s ease',
+                                  width: '100%',
+                                  textAlign: 'center'
+                                }}
+                              >
+                                {inInterview ? "✓ In Interviews" : "Interview"}
+                              </button>
+                            );
+                          })()}
                           
                           <div style={{ display: 'flex', gap: '8px', justifyContent: 'center', alignItems: 'center' }}>
                             <span 
@@ -762,6 +752,54 @@ export default function RankingsPage({ params }: { params: { jobId: string } }) 
                 </p>
               </div>
 
+              {/* Semantic Relevance (CV summary ↔ Job summary) */}
+              {selectedCandidateProfile.semantic_summary && (
+                <div style={{
+                  background: selectedCandidateProfile.semantic_relevant ? '#eef6ff' : '#f8fafc',
+                  padding: '20px',
+                  borderRadius: '16px',
+                  borderLeft: `6px solid ${selectedCandidateProfile.semantic_relevant ? '#4361ee' : '#94a3b8'}`,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '8px'
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '1px', fontWeight: 800, color: selectedCandidateProfile.semantic_relevant ? '#1e3a8a' : '#475569' }}>
+                      🧠 Semantic Relevance
+                    </span>
+                    <span style={{
+                      fontSize: '11px', fontWeight: 800, padding: '3px 10px', borderRadius: '30px',
+                      background: selectedCandidateProfile.semantic_relevant ? '#dbeafe' : '#e2e8f0',
+                      color: selectedCandidateProfile.semantic_relevant ? '#1e3a8a' : '#475569'
+                    }}>
+                      {selectedCandidateProfile.semantic_relevant ? 'Relevant' : 'Limited relevance'}
+                    </span>
+                  </div>
+                  <p style={{ margin: 0, fontSize: '14px', lineHeight: '1.6', color: '#333' }}>
+                    {selectedCandidateProfile.semantic_summary}
+                  </p>
+                  {(selectedCandidateProfile.cv_summary || selectedCandidateProfile.job_summary) && (
+                    <details style={{ marginTop: '4px' }}>
+                      <summary style={{ cursor: 'pointer', fontSize: '12px', fontWeight: 700, color: '#4361ee' }}>
+                        View candidate &amp; job summaries
+                      </summary>
+                      <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        {selectedCandidateProfile.cv_summary && (
+                          <div style={{ fontSize: '13px', color: '#333' }}>
+                            <strong style={{ color: '#1e293b' }}>Candidate:</strong> {selectedCandidateProfile.cv_summary}
+                          </div>
+                        )}
+                        {selectedCandidateProfile.job_summary && (
+                          <div style={{ fontSize: '13px', color: '#333' }}>
+                            <strong style={{ color: '#1e293b' }}>Job:</strong> {selectedCandidateProfile.job_summary}
+                          </div>
+                        )}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              )}
+
               {/* Grid: Skills Match */}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
                 {/* Matched Skills */}
@@ -910,51 +948,35 @@ export default function RankingsPage({ params }: { params: { jobId: string } }) 
               from { transform: scale(0.95); opacity: 0; }
               to { transform: scale(1); opacity: 1; }
             }
+            .ranking-item { transition: transform 0.2s ease, box-shadow 0.2s ease !important; }
             .rank-card-0 {
-              background: #fffdfa !important;
-              border: 1px solid rgba(56, 18, 11, 0.1) !important;
+              background: linear-gradient(135deg, #fff3c4, #ffe066) !important;
+              border: 1px solid rgba(214, 158, 0, 0.35) !important;
+              box-shadow: 0 8px 22px rgba(214, 158, 0, 0.18) !important;
             }
-            .rank-card-0:hover {
-              background: #fffcf8 !important;
-              transform: translateY(-2px);
-              box-shadow: 0 8px 20px rgba(56, 18, 11, 0.08) !important;
-            }
+            .rank-card-0:hover { transform: translateY(-3px); box-shadow: 0 12px 28px rgba(214, 158, 0, 0.3) !important; }
             .rank-card-1 {
-              background: #ffeed6 !important;
-              border: 1px solid rgba(255, 125, 41, 0.15) !important;
+              background: linear-gradient(135deg, #eef1f6, #cdd6e3) !important;
+              border: 1px solid rgba(120, 140, 165, 0.35) !important;
+              box-shadow: 0 8px 22px rgba(120, 140, 165, 0.15) !important;
             }
-            .rank-card-1:hover {
-              background: #ffe8c4 !important;
-              transform: translateY(-2px);
-              box-shadow: 0 8px 20px rgba(255, 125, 41, 0.08) !important;
-            }
+            .rank-card-1:hover { transform: translateY(-3px); box-shadow: 0 12px 28px rgba(120, 140, 165, 0.28) !important; }
             .rank-card-2 {
-              background: #ffe2bf !important;
-              border: 1px solid rgba(255, 155, 68, 0.15) !important;
+              background: linear-gradient(135deg, #ffd9b0, #ff9b54) !important;
+              border: 1px solid rgba(196, 98, 0, 0.3) !important;
+              box-shadow: 0 8px 22px rgba(196, 98, 0, 0.15) !important;
             }
-            .rank-card-2:hover {
-              background: #ffdca8 !important;
-              transform: translateY(-2px);
-              box-shadow: 0 8px 20px rgba(255, 155, 68, 0.08) !important;
-            }
+            .rank-card-2:hover { transform: translateY(-3px); box-shadow: 0 12px 28px rgba(196, 98, 0, 0.28) !important; }
             .rank-card-other-even {
-              background: #ffeed6 !important;
-              border: 1px solid rgba(255, 155, 68, 0.1) !important;
+              background: linear-gradient(135deg, #f3e8ff, #e7d3ff) !important;
+              border: 1px solid rgba(114, 9, 183, 0.12) !important;
             }
-            .rank-card-other-even:hover {
-              background: #ffe8c4 !important;
-              transform: translateY(-2px);
-              box-shadow: 0 8px 20px rgba(255, 155, 68, 0.08) !important;
-            }
+            .rank-card-other-even:hover { transform: translateY(-3px); box-shadow: 0 10px 24px rgba(114, 9, 183, 0.15) !important; }
             .rank-card-other-odd {
-              background: #ffe2bf !important;
-              border: 1px solid rgba(255, 155, 68, 0.1) !important;
+              background: linear-gradient(135deg, #e3f6ff, #cfecff) !important;
+              border: 1px solid rgba(67, 97, 238, 0.12) !important;
             }
-            .rank-card-other-odd:hover {
-              background: #ffdca8 !important;
-              transform: translateY(-2px);
-              box-shadow: 0 8px 20px rgba(255, 155, 68, 0.08) !important;
-            }
+            .rank-card-other-odd:hover { transform: translateY(-3px); box-shadow: 0 10px 24px rgba(67, 97, 238, 0.15) !important; }
           `}</style>
         </div>
       )}
