@@ -27,7 +27,7 @@ from the resume text provided.  Return a JSON object with exactly these keys:
   "name": "<candidate full name>",
   "current_role": "<candidate's most recent or current role>",
   "skills": ["list of technical skills, tools, languages, frameworks, methodologies, and core competencies"],
-  "soft_skills": ["list of soft skills and interpersonal attributes like leadership, communication"],
+  "soft_skills": ["list of 3 to 6 soft skills inferred from work experience (e.g. leadership, collaboration). Leave empty only if genuinely no evidence exists"],
   "roles": ["list of job titles the candidate has held"],
   "domains": ["list of industry domains or sectors"],
   "years_experience": <integer – total years of professional experience>,
@@ -41,7 +41,14 @@ Rules:
 - Normalise skill names to their most common form (e.g. 'JS' → 'javascript').
 - **Current Role Rule:** `current_role` MUST be the candidate's actual most recent/current job title listed in their chronological work experience section. Do NOT extract descriptive, target, or self-proclaimed titles from the Professional Summary or Objective sections if they differ from the actual latest title on the timeline.
 - **Compound Skill Rule:** Do NOT split compound or brand name tools into individual components (e.g., "SAP Concur" is a single expense management tool and must be extracted as "SAP Concur" or "Concur expense", but NEVER split into "SAP" and "Concur" as two separate skills).
-- **Hard Skills vs Soft Skills Rule:** Do NOT place core professional/technical competencies, methodologies, or tools (e.g., Clinical Operations, Vendor Management, Budget Tracking, Contract Negotiation, Pass-Through Expenses, Merchandising, Retail Management, Loss Prevention, Git, Agile) into "soft_skills". These are professional competencies/methodologies/tools and MUST go into "skills". Only interpersonal/behavioral skills (e.g. leadership, communication, teamwork, adaptability) should go into "soft_skills".
+- **Soft Skills Inference Rule:** Most resumes do not list soft skills explicitly. You MUST actively infer interpersonal, behavioral, and working-style skills from the work history bullets. For example:
+  - "led / managed / headed a team" → leadership
+  - "mentored / coached / trained juniors" → mentoring
+  - "cross-functional / worked with stakeholders / presented" → collaboration, communication, stakeholder management
+  - "owned / drove / was responsible for" → ownership
+  - "solved / debugged / root-caused / optimized" → problem-solving
+  Include others like adaptability, time management, and analytical thinking when evidenced. Return 3-6 soft skills if evidence exists.
+- **Hard Skills vs Soft Skills Guard:** Do NOT place core technical tools, domain competencies, or formal methodologies (e.g., Clinical Operations, Vendor Management, Budget Tracking, Contract Negotiation, Pass-Through Expenses, Merchandising, Retail Management, Loss Prevention, Git, Agile, Scrum) into "soft_skills". These are professional methodologies and MUST go into "skills". Working styles and behaviors (ownership, problem-solving, adaptability) are soft skills.
 - years_experience should be your best integer estimate; use 0 if unclear.
 - Return ONLY valid JSON, no markdown fences."""
 
