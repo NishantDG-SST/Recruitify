@@ -13,6 +13,7 @@ CREATE TABLE users (
     email TEXT NOT NULL UNIQUE,
     full_name TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
+    password_hash TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

@@ -103,24 +103,82 @@ export default function CandidatesPage() {
     }
   };
 
+  const initials = (name: string) => (name || "?").split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2);
+  const STATUS_STYLES: Record<string, { bg: string; color: string }> = {
+    selected: { bg: "#d8f3dc", color: "#1b4332" },
+    rejected: { bg: "#fde2e4", color: "#721c24" },
+    interviewing: { bg: "#e7d3ff", color: "#5a189a" },
+    interview: { bg: "#e7d3ff", color: "#5a189a" },
+    extracted: { bg: "#ffe8d6", color: "#b4462f" },
+    processing: { bg: "#fff3cd", color: "#856404" },
+  };
+  const statusStyle = (s: string) => STATUS_STYLES[s] || { bg: "rgba(56,18,11,0.08)", color: "#755f58" };
+  const inInterviewCount = candidates.filter(c => ["interview", "interviewing"].includes(c.status)).length;
+  const selectedCount = candidates.filter(c => c.status === "selected").length;
+  const selectedJobObj = jobs.find(j => j.id === selectedJob);
+
   return (
     <>
       <h1 className="page-title">Candidate Directory</h1>
-      <p className="page-subtitle">Manage and review all uploaded resumes.</p>
+      <p className="page-subtitle">Manage and review all uploaded resumes{selectedJobObj ? ` for ${selectedJobObj.title}` : ""}.</p>
 
       <div className="stats-grid">
         <div className="stat-card purple">
-          <div className="stat-title">Total Candidates</div>
+          <div className="stat-title">👥 Total Candidates</div>
           <div className="stat-value">{candidates.length}</div>
+          <div className="stat-trend">{selectedJobObj ? selectedJobObj.title : "All jobs"}</div>
         </div>
         <div className="stat-card orange">
-          <div className="stat-title">In Pipeline</div>
-          <div className="stat-value">{candidates.filter(c => c.status === 'processing').length}</div>
+          <div className="stat-title">🎙️ In Interview</div>
+          <div className="stat-value">{inInterviewCount}</div>
+          <div className="stat-trend">Currently interviewing</div>
         </div>
         <div className="stat-card pink">
-          <div className="stat-title">Placed</div>
-          <div className="stat-value">0</div>
+          <div className="stat-title">✅ Selected</div>
+          <div className="stat-value">{selectedCount}</div>
+          <div className="stat-trend">Offers extended</div>
         </div>
+      </div>
+
+      {/* Job switcher */}
+      <div style={{ marginBottom: 24 }}>
+        <div style={{ fontWeight: 900, fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: "var(--text-muted)", marginBottom: 10 }}>
+          Jobs
+        </div>
+        {jobs.length === 0 ? (
+          <div className="ranking-item" style={{ maxWidth: 320 }}>
+            <div className="ranking-info"><div className="ranking-desc">No jobs yet. Create a job to begin.</div></div>
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+            {jobs.map(job => {
+              const active = selectedJob === job.id;
+              return (
+                <button
+                  key={job.id}
+                  onClick={() => setSelectedJob(job.id)}
+                  style={{
+                    textAlign: "left", cursor: "pointer", minWidth: 200,
+                    border: "none", borderLeft: `6px solid ${active ? "#ff7d29" : "transparent"}`,
+                    borderRadius: 16, padding: "14px 18px",
+                    background: active ? "var(--card-light-orange)" : "rgba(56,18,11,0.05)",
+                    boxShadow: active ? "0 6px 16px rgba(255,123,41,0.25)" : "none",
+                    transition: "all 0.2s ease",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 16 }}>💼</span>
+                    <span style={{ fontWeight: 800, fontSize: 15, color: "var(--text-main)" }}>{job.title}</span>
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 700, marginTop: 4 }}>
+                    {job.created_at ? `Created ${new Date(job.created_at).toLocaleDateString()}` : ""}
+                    {active ? "  ·  ● Active" : ""}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Upload Progress Banner */}
@@ -160,63 +218,64 @@ export default function CandidatesPage() {
       )}
 
       <div className="panel light-orange">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-          <h2>All Candidates</h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: 12 }}>
+          <h2 style={{ margin: 0 }}>All Candidates {candidates.length > 0 && <span className="tag" style={{ fontSize: 12 }}>{candidates.length}</span>}</h2>
           <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-            <select 
-              className="search-bar" 
-              style={{ padding: '10px 16px', borderRadius: '24px', border: '1px solid #ccc' }}
-              value={selectedJob} 
-              onChange={e => setSelectedJob(e.target.value)}
-            >
-              <option value="" disabled>Select Job</option>
-              {jobs.map(job => (
-                <option key={job.id} value={job.id}>{job.title}</option>
-              ))}
-            </select>
-            <input 
-              type="file" 
-              multiple 
-              ref={fileInputRef} 
-              onChange={handleFileChange} 
-              style={{ display: 'none' }} 
+            <input
+              type="file"
+              multiple
+              ref={fileInputRef}
+              onChange={handleFileChange}
+              style={{ display: 'none' }}
               accept=".pdf,.txt,.docx"
             />
-            <button 
-              className="pill-button" 
+            <button
+              className="pill-button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={isUploading}
+              disabled={isUploading || !selectedJob}
+              style={{ background: '#7209b7', color: '#fff', padding: '10px 20px' }}
             >
-              {isUploading ? "Uploading..." : "Upload Resumes (Batch)"}
+              {isUploading ? "Uploading..." : "⬆ Upload Resumes (Batch)"}
             </button>
           </div>
         </div>
-        
+
         <div className="ranking-list">
-          {isLoading && <p>Loading candidates...</p>}
-          {!isLoading && candidates.length === 0 && <p>No candidates found in the database.</p>}
-          {!isLoading && candidates.map(c => (
-            <div className="ranking-item" key={c.id}>
-              <div className="ranking-avatar"></div>
-              <div className="ranking-info">
-                <div className="ranking-name">{c.name} <span className="tag" style={{ marginLeft: 8 }}>{c.id.slice(0,8)}</span></div>
-                <div className="ranking-desc">{c.role} • Uploaded {new Date(c.created_at).toLocaleDateString()}</div>
-              </div>
-              <div className="tag">{c.status}</div>
-              <Link href={`/candidates/${c.id}`}>
-                <button className="pill-button" style={{ marginLeft: '12px', background: 'var(--bg-page)', color: 'var(--text-main)' }}>
-                  View Profile
-                </button>
-              </Link>
-              <button 
-                className="pill-button" 
-                onClick={() => handleDeleteCandidate(c.id)}
-                style={{ marginLeft: '8px', background: '#d90429', color: '#fff', fontSize: '11px', padding: '6px 12px' }}
-              >
-                Delete
-              </button>
+          {isLoading && <p style={{ color: '#6b5a52' }}>Loading candidates...</p>}
+          {!isLoading && candidates.length === 0 && (
+            <div style={{ textAlign: "center", padding: "40px 24px", border: "2px dashed rgba(56,18,11,0.18)", borderRadius: 20, background: "rgba(255,255,255,0.4)" }}>
+              <div style={{ fontSize: 40 }}>📄</div>
+              <p style={{ color: "#6b5a52", fontWeight: 800, fontSize: 15, margin: "8px 0 0" }}>No candidates yet</p>
+              <p style={{ color: "#8a7a72", margin: "4px 0 0" }}>Upload resumes for this job to populate the directory.</p>
             </div>
-          ))}
+          )}
+          {!isLoading && candidates.map(c => {
+            const ss = statusStyle(c.status);
+            return (
+              <div className="ranking-item" key={c.id}>
+                <div className="ranking-avatar" style={{ display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, color: "#fff", fontSize: 15 }}>
+                  {initials(c.name)}
+                </div>
+                <div className="ranking-info">
+                  <div className="ranking-name">{c.name} <span className="tag" style={{ marginLeft: 8, fontSize: 10 }}>{c.id.slice(0, 8)}</span></div>
+                  <div className="ranking-desc">{c.role} • Uploaded {new Date(c.created_at).toLocaleDateString()}</div>
+                </div>
+                <span className="tag" style={{ textTransform: "uppercase", fontSize: 10, fontWeight: 800, background: ss.bg, color: ss.color }}>{c.status}</span>
+                <Link href={`/candidates/${c.id}`}>
+                  <button className="pill-button" style={{ marginLeft: '12px', background: 'var(--bg-page)', color: 'var(--text-main)' }}>
+                    View Profile
+                  </button>
+                </Link>
+                <button
+                  className="pill-button"
+                  onClick={() => handleDeleteCandidate(c.id)}
+                  style={{ marginLeft: '8px', background: '#d90429', color: '#fff', fontSize: '11px', padding: '6px 12px' }}
+                >
+                  Delete
+                </button>
+              </div>
+            );
+          })}
         </div>
       </div>
     </>

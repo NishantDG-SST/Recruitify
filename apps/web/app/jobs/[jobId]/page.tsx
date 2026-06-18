@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { deleteJob } from "../../lib/api";
+import { deleteJob, fetchJobDetail } from "../../lib/api";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "/api";
 
@@ -12,6 +12,11 @@ export default function JobWorkspacePage({ params }: { params: { jobId: string }
   const [clearing, setClearing] = useState(false);
   const [clearStatus, setClearStatus] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [job, setJob] = useState<any>(null);
+
+  useEffect(() => {
+    fetchJobDetail(params.jobId).then(setJob).catch(console.error);
+  }, [params.jobId]);
 
   const handleClearAll = async () => {
     if (!confirm("⚠️ This will delete ALL candidates for this job. This cannot be undone. Are you sure?")) return;
@@ -45,11 +50,27 @@ export default function JobWorkspacePage({ params }: { params: { jobId: string }
     <div className="hero">
       <div>
         <span className="badge">Job workspace</span>
-        <h1>Job Dashboard</h1>
+        <h1>{job?.title || "Job Dashboard"}</h1>
         <p>
           Upload resumes, watch parsing progress, and review the ranked shortlist
           with evidence.
         </p>
+        {job?.summary && (
+          <div style={{
+            marginTop: '16px',
+            background: 'rgba(255,255,255,0.6)',
+            borderLeft: '5px solid #7209b7',
+            borderRadius: '12px',
+            padding: '16px 20px'
+          }}>
+            <div style={{ fontSize: '11px', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '1px', color: '#7209b7', marginBottom: '6px' }}>
+              AI Job Summary
+            </div>
+            <p style={{ margin: 0, fontSize: '14px', lineHeight: 1.7, color: 'var(--text-main)' }}>
+              {job.summary}
+            </p>
+          </div>
+        )}
       </div>
       <div className="panel">
         <h2>Actions</h2>

@@ -1,20 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  async rewrites() {
-    return [
-      // Proxy API requests to the Python backend
-      // But ensure NextAuth requests are handled by Next.js
-      {
-        source: "/api/auth/:path*",
-        destination: "/api/auth/:path*",
-      },
-      {
-        source: "/api/:path*",
-        destination: "http://127.0.0.1:8000/:path*",
-      },
-    ];
-  },
+  // API proxying is handled in middleware.ts (rewrites /api/* to INTERNAL_API_URL
+  // with auth + the internal token), so no static rewrites are needed here.
 };
 
 export default nextConfig;

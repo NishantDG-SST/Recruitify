@@ -120,6 +120,14 @@ export async function fetchCandidateRounds(jobId: string, candidateId: string) {
   return response.json();
 }
 
+export async function fetchInterviewCandidates(jobId: string) {
+  const response = await fetch(`${API_BASE}/jobs/${jobId}/interview-candidates`);
+  if (!response.ok) {
+    throw new Error("Failed to fetch interview candidates");
+  }
+  return response.json();
+}
+
 export async function fetchCandidateJobProfile(jobId: string, candidateId: string) {
   const response = await fetch(`${API_BASE}/jobs/${jobId}/candidates/${candidateId}/profile`);
   if (!response.ok) {

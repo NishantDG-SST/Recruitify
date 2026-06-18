@@ -1,0 +1,35 @@
+# Render Blueprint for the FastAPI backend.
+# Create via Render dashboard → New + → Blueprint, pointed at this repo (branch: main).
+# Secrets (sync:false) are entered in the dashboard; INTERNAL_API_TOKEN is auto-generated
+# and must be copied into the Vercel frontend env of the same name.
+services:
+  - type: web
+    name: recruitify-api
+    runtime: python
+    plan: free
+    region: singapore
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: PYTHONPATH=apps/api/src uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: APP_ENV
+        value: production
+      - key: OPENAI_BASE_URL
+        value: https://api.groq.com/openai/v1
+      - key: LLM_MODEL
+        value: meta-llama/llama-4-scout-17b-16e-instruct
+      - key: EMBEDDING_MODEL
+        value: gemini-embedding-001
+      - key: STORAGE_ROOT
+        value: /tmp/recruitment-platform
+      - key: INTERNAL_API_TOKEN
+        generateValue: true
+      - key: DATABASE_DSN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
