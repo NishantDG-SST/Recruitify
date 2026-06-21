@@ -55,9 +55,14 @@ export default function Sidebar() {
               <path d="M43 60l7 10 7-10" fill="#e0a96d" />
             </svg>
           </div>
-          <div style={{ fontSize: '13px', lineHeight: '1.3' }}>
-            <strong style={{ color: '#ffffff' }}>{session?.user?.name || 'Recruiter'}</strong><br/>
-            <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.6)' }}>{session?.user?.email || 'Not signed in'}</span>
+          <div style={{ fontSize: '13px', lineHeight: '1.3', minWidth: 0 }}>
+            <strong style={{ color: '#ffffff', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {session?.user?.name || 'Recruiter'}
+            </strong>
+            <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.5)', display: 'block', marginBottom: '1px' }}>Recruiter</span>
+            <span style={{ fontSize: '10px', color: 'rgba(255,255,255,0.6)', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {session?.user?.email || ''}
+            </span>
           </div>
         </div>
       </div>

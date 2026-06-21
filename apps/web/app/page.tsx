@@ -2,7 +2,16 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
+import { useSession } from "next-auth/react";
 import { fetchJobs, fetchCandidates } from "./lib/api";
+
+function getGreeting(): string {
+  const hour = new Date().getHours();
+  if (hour >= 5 && hour < 12) return "Good Morning";
+  if (hour >= 12 && hour < 17) return "Good Afternoon";
+  if (hour >= 17 && hour < 21) return "Good Evening";
+  return "Good Night";
+}
 
 type JobStat = { job: any; count: number; statuses: string[] };
 
@@ -30,10 +39,18 @@ function PlaceholderRow() {
 }
 
 export default function Home() {
+  const { data: session } = useSession();
   const [jobs, setJobs] = useState<any[]>([]);
   const [candidates, setCandidates] = useState<any[]>([]);
   const [jobStats, setJobStats] = useState<JobStat[]>([]);
   const [loading, setLoading] = useState(true);
+  const [greeting, setGreeting] = useState(getGreeting());
+
+  useEffect(() => {
+    setGreeting(getGreeting());
+    const timer = setInterval(() => setGreeting(getGreeting()), 60000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -87,7 +104,7 @@ export default function Home() {
 
   return (
     <>
-      <h1 className="page-title">Good Morning</h1>
+      <h1 className="page-title">{greeting}{session?.user?.name ? `, ${session.user.name.split(' ')[0]}` : ''}! 👋</h1>
       <p className="page-subtitle">Here's today's overview of your hiring pipeline.</p>
 
       {/* Stat cards */}

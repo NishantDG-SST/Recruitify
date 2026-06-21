@@ -45,6 +45,8 @@ const authOptions = {
       if (user) {
         token.id = user.id;
         token.org_id = user.org_id;
+        token.name = user.name;
+        token.email = user.email;
       }
       return token;
     },
@@ -52,6 +54,8 @@ const authOptions = {
       if (session.user) {
         session.user.id = token.id;
         session.user.org_id = token.org_id;
+        session.user.name = token.name;
+        session.user.email = token.email;
       }
       return session;
     },
