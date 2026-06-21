@@ -104,7 +104,7 @@ export default function Home() {
 
   return (
     <>
-      <h1 className="page-title">{greeting}{session?.user?.name ? `, ${session.user.name.split(' ')[0]}` : ''}! 👋</h1>
+      <h1 className="page-title">{greeting}{session?.user?.name ? `, ${session.user.name.split(' ')[0]}` : ''}!</h1>
       <p className="page-subtitle">Here's today's overview of your hiring pipeline.</p>
 
       {/* Stat cards */}
